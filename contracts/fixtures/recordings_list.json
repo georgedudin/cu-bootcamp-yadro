@@ -1,0 +1,26 @@
+[
+  {
+    "id": "7f9d3e04-2b1c-4b6e-9a70-5a1f6d2c8e11",
+    "filename": "linear-algebra-lecture-07.mp3",
+    "uploaded_at": "2026-07-20T14:03:22Z",
+    "duration_s": 100.0,
+    "status": "done",
+    "progress": { "done_chunks": 3, "total_chunks": 3 }
+  },
+  {
+    "id": "c2a8b7d1-6e5f-4a3b-8c9d-0e1f2a3b4c5d",
+    "filename": "physics-seminar-12.mp3",
+    "uploaded_at": "2026-07-21T09:41:05Z",
+    "duration_s": 5405.8,
+    "status": "processing",
+    "progress": { "done_chunks": 57, "total_chunks": 136 }
+  },
+  {
+    "id": "9b1c2d3e-4f5a-6b7c-8d9e-0a1b2c3d4e5f",
+    "filename": "chemistry-lab-brief.mp3",
+    "uploaded_at": "2026-07-22T08:15:44Z",
+    "duration_s": null,
+    "status": "uploaded",
+    "progress": { "done_chunks": 0, "total_chunks": 0 }
+  }
+]

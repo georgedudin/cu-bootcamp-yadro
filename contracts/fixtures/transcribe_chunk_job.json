@@ -1,0 +1,9 @@
+{
+  "recording_id": "7f9d3e04-2b1c-4b6e-9a70-5a1f6d2c8e11",
+  "chunk_index": 3,
+  "wav_uri": "/blob/7f9d3e04-2b1c-4b6e-9a70-5a1f6d2c8e11/audio.wav",
+  "start_s": 120.0,
+  "end_s": 165.0,
+  "target_sr": 16000,
+  "expected_speakers": 13
+}

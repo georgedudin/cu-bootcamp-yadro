@@ -1,0 +1,116 @@
+name: yadro
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-yadro}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-yadro}
+      POSTGRES_DB: ${POSTGRES_DB:-yadro}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-yadro}"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # AOF on: queued jobs survive a redis restart (Postgres stays the SoT)
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build:
+      context: ..
+      dockerfile: infra/dockerfiles/backend.Dockerfile
+    restart: unless-stopped
+    environment: &app_env
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-yadro}:${POSTGRES_PASSWORD:-yadro}@postgres:5432/${POSTGRES_DB:-yadro}
+      REDIS_URL: redis://redis:6379/0
+      BLOB_DIR: /blob
+    volumes:
+      - blob:/blob
+    ports:
+      # Host ports are env-tunable — the deploy box is shared by 6 teams
+      # (set YADRO_API_PORT in infra/.env there; defaults suit local dev)
+      - "${YADRO_API_PORT:-8000}:8000"   # direct API access; the FE goes via nginx
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  ml-chunk-worker:
+    build:
+      context: ..
+      dockerfile: infra/dockerfiles/ml.Dockerfile
+    restart: unless-stopped
+    command: ["python", "-m", "ml.worker", "chunks"]
+    environment: *app_env
+    volumes:
+      - blob:/blob
+    depends_on:
+      backend:
+        condition: service_healthy
+    # FRIEND A — GPU wiring (uncomment when the real pipeline lands; needs
+    # NVIDIA Container Toolkit on the host). Keep ONE chunk-worker per GPU.
+    # REQUIREMENT: stay 1080-friendly — int8 default (works on Pascal CC 6.1).
+    # Current shared box is an RTX A4000 (CC 8.6, 16 GB VRAM shared by 6
+    # teams): float16 works THERE as an infra/.env override, but int8 stays
+    # the default (Pascal-safe + half the VRAM on a shared GPU).
+    # environment:
+    #   <<: *app_env
+    #   HF_HUB_OFFLINE: "1"
+    #   TRANSFORMERS_OFFLINE: "1"
+    #   ASR_MODEL: large-v3
+    #   ASR_COMPUTE_TYPE: int8   # GTX 1080 is Pascal CC 6.1: float16 unsupported
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+  ml-reduce-worker:
+    build:
+      context: ..
+      dockerfile: infra/dockerfiles/ml.Dockerfile
+    restart: unless-stopped
+    command: ["python", "-m", "ml.worker", "reduce"]
+    environment: *app_env
+    volumes:
+      - blob:/blob
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: infra/dockerfiles/frontend.Dockerfile
+    restart: unless-stopped
+    ports:
+      - "${YADRO_HTTP_PORT:-8080}:80"
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:
+  redisdata:
+  blob:

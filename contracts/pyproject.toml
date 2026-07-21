@@ -1,0 +1,16 @@
+[project]
+name = "contracts"
+version = "0.1.0"
+description = "Wire contracts: Pydantic models -> JSON Schema -> generated TypeScript"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.7",
+    "annotated-types>=0.6",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/contracts"]

@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>YADRO — lecture ASR + diarization</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 720px; margin: 3rem auto; padding: 0 1rem; color: #222; }
+  h1 { font-size: 1.3rem; }
+  .note { background: #f6f6f6; border-left: 4px solid #888; padding: .8rem 1rem; font-size: .9rem; }
+  table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
+  td, th { border-bottom: 1px solid #ddd; padding: .4rem .6rem; text-align: left; font-size: .9rem; }
+  code { background: #eee; padding: .1rem .3rem; border-radius: 3px; }
+</style>
+</head>
+<body>
+<h1>YADRO — lecture ASR + diarization</h1>
+<p class="note">
+  Placeholder page (Friend B: the React SPA replaces this — see
+  <code>frontend/README.md</code>; your API types are in
+  <code>contracts/generated/contracts.ts</code>). Upload + polling below prove
+  the same-origin <code>/api</code> wiring end-to-end.
+</p>
+
+<form id="upload">
+  <input type="file" name="file" accept=".mp3" required>
+  <input type="number" name="expected_speakers" min="2" placeholder="expected speakers (optional)">
+  <button>Upload</button>
+</form>
+
+<table>
+  <thead><tr><th>file</th><th>status</th><th>progress</th><th>timeline</th></tr></thead>
+  <tbody id="rows"></tbody>
+</table>
+
+<script>
+async function refresh() {
+  const recs = await (await fetch('/api/recordings')).json();
+  document.getElementById('rows').innerHTML = recs.map(r => `
+    <tr>
+      <td>${r.filename}</td>
+      <td>${r.status}</td>
+      <td>${r.progress.done_chunks}/${r.progress.total_chunks}</td>
+      <td>${r.status === 'done' ? `<a href="/api/recordings/${r.id}/timeline">json</a>` : '—'}</td>
+    </tr>`).join('');
+}
+document.getElementById('upload').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const data = new FormData(e.target);
+  if (!data.get('expected_speakers')) data.delete('expected_speakers');
+  const res = await fetch('/api/recordings', { method: 'POST', body: data });
+  if (!res.ok) alert((await res.json()).detail);
+  refresh();
+});
+refresh();
+setInterval(refresh, 2000);  // the architecture's 2-3s polling
+</script>
+</body>
+</html>

@@ -1,0 +1,49 @@
+# CI on every PR and push; deploy to the bootcamp server on pushes to main.
+# The repo is PUBLIC: secrets live only in Actions secrets, the deploy job
+# never runs for pull_request events (forks can't reach secrets), and only
+# official actions are used (no marketplace supply chain).
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main, bootstrap]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v9
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+      - name: Unit tests
+        run: make test
+      - name: Contracts drift gate
+        run: make contracts-check
+
+  deploy:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: deploy
+      cancel-in-progress: false
+    timeout-minutes: 30
+    steps:
+      - name: Deploy over SSH
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          ssh -i ~/.ssh/deploy_key "$DEPLOY_USER@$DEPLOY_HOST" \
+            "cd ~/cu-bootcamp-yadro \
+             && git fetch origin main \
+             && git reset --hard origin/main \
+             && bash scripts/deploy.sh"

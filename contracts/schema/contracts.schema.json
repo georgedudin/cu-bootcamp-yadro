@@ -1,0 +1,543 @@
+{
+  "$defs": {
+    "ChunkResult": {
+      "additionalProperties": false,
+      "description": "Output of the map step, upserted keyed by (recording_id, chunk_index).",
+      "properties": {
+        "chunk_index": {
+          "title": "Chunk Index",
+          "type": "integer"
+        },
+        "recording_id": {
+          "format": "uuid",
+          "title": "Recording Id",
+          "type": "string"
+        },
+        "segments": {
+          "items": {
+            "$ref": "#/$defs/ChunkSegment"
+          },
+          "title": "Segments",
+          "type": "array"
+        },
+        "turns": {
+          "items": {
+            "$ref": "#/$defs/Turn"
+          },
+          "title": "Turns",
+          "type": "array"
+        }
+      },
+      "required": [
+        "recording_id",
+        "chunk_index",
+        "segments",
+        "turns"
+      ],
+      "title": "ChunkResult",
+      "type": "object"
+    },
+    "ChunkSegment": {
+      "additionalProperties": false,
+      "properties": {
+        "end": {
+          "title": "End",
+          "type": "number"
+        },
+        "local_speaker": {
+          "description": "Chunk-LOCAL diarization label (e.g. 'SPEAKER_00'). Meaningless across chunks \u2014 the stitch step maps it to a global id.",
+          "title": "Local Speaker",
+          "type": "string"
+        },
+        "start": {
+          "title": "Start",
+          "type": "number"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "words": {
+          "items": {
+            "$ref": "#/$defs/Word"
+          },
+          "title": "Words",
+          "type": "array"
+        }
+      },
+      "required": [
+        "start",
+        "end",
+        "text",
+        "local_speaker",
+        "words"
+      ],
+      "title": "ChunkSegment",
+      "type": "object"
+    },
+    "ChunkWindow": {
+      "additionalProperties": false,
+      "description": "A chunk's window in the recording. The glue passes these to stitch()\nso it can dedupe the overlap seams between adjacent chunks.",
+      "properties": {
+        "chunk_index": {
+          "title": "Chunk Index",
+          "type": "integer"
+        },
+        "end_s": {
+          "title": "End S",
+          "type": "number"
+        },
+        "start_s": {
+          "title": "Start S",
+          "type": "number"
+        }
+      },
+      "required": [
+        "chunk_index",
+        "start_s",
+        "end_s"
+      ],
+      "title": "ChunkWindow",
+      "type": "object"
+    },
+    "Progress": {
+      "additionalProperties": false,
+      "properties": {
+        "done_chunks": {
+          "title": "Done Chunks",
+          "type": "integer"
+        },
+        "total_chunks": {
+          "title": "Total Chunks",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "done_chunks",
+        "total_chunks"
+      ],
+      "title": "Progress",
+      "type": "object"
+    },
+    "RecordingCreateResponse": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "format": "uuid",
+          "title": "Id",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/RecordingStatus"
+        }
+      },
+      "required": [
+        "id",
+        "status"
+      ],
+      "title": "RecordingCreateResponse",
+      "type": "object"
+    },
+    "RecordingDetail": {
+      "additionalProperties": false,
+      "properties": {
+        "duration_s": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Duration S"
+        },
+        "expected_speakers": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Total distinct speakers expected, INCLUDING the teacher (12 students + 1 teacher -> 13). Optional upload hint.",
+          "title": "Expected Speakers"
+        },
+        "filename": {
+          "title": "Filename",
+          "type": "string"
+        },
+        "id": {
+          "format": "uuid",
+          "title": "Id",
+          "type": "string"
+        },
+        "progress": {
+          "$ref": "#/$defs/Progress"
+        },
+        "status": {
+          "$ref": "#/$defs/RecordingStatus"
+        },
+        "uploaded_at": {
+          "format": "date-time",
+          "title": "Uploaded At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "filename",
+        "uploaded_at",
+        "duration_s",
+        "status",
+        "progress"
+      ],
+      "title": "RecordingDetail",
+      "type": "object"
+    },
+    "RecordingStatus": {
+      "description": "Lifecycle of a recording (architecture \u00a75A state machine).\n\nuploaded -> queued -> processing -> stitching -> done\nAny stage can end in `failed` (after retries).",
+      "enum": [
+        "uploaded",
+        "queued",
+        "processing",
+        "stitching",
+        "done",
+        "failed"
+      ],
+      "title": "RecordingStatus",
+      "type": "string"
+    },
+    "RecordingSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "duration_s": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Duration S"
+        },
+        "filename": {
+          "title": "Filename",
+          "type": "string"
+        },
+        "id": {
+          "format": "uuid",
+          "title": "Id",
+          "type": "string"
+        },
+        "progress": {
+          "$ref": "#/$defs/Progress"
+        },
+        "status": {
+          "$ref": "#/$defs/RecordingStatus"
+        },
+        "uploaded_at": {
+          "format": "date-time",
+          "title": "Uploaded At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "filename",
+        "uploaded_at",
+        "duration_s",
+        "status",
+        "progress"
+      ],
+      "title": "RecordingSummary",
+      "type": "object"
+    },
+    "SpeakerRole": {
+      "enum": [
+        "teacher",
+        "student"
+      ],
+      "title": "SpeakerRole",
+      "type": "string"
+    },
+    "StitchRecordingJob": {
+      "additionalProperties": false,
+      "description": "Reduce job: fired exactly once by the atomic barrier.",
+      "properties": {
+        "recording_id": {
+          "format": "uuid",
+          "title": "Recording Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "recording_id"
+      ],
+      "title": "StitchRecordingJob",
+      "type": "object"
+    },
+    "StitchResult": {
+      "additionalProperties": false,
+      "description": "Output of the reduce step: global speakers + the final timeline segments.",
+      "properties": {
+        "segments": {
+          "items": {
+            "$ref": "#/$defs/TimelineSegment"
+          },
+          "title": "Segments",
+          "type": "array"
+        },
+        "speakers": {
+          "items": {
+            "$ref": "#/$defs/StitchSpeaker"
+          },
+          "title": "Speakers",
+          "type": "array"
+        }
+      },
+      "required": [
+        "speakers",
+        "segments"
+      ],
+      "title": "StitchResult",
+      "type": "object"
+    },
+    "StitchSpeaker": {
+      "additionalProperties": false,
+      "description": "TimelineSpeaker + bookkeeping the DB keeps but the FE doesn't need.",
+      "properties": {
+        "id": {
+          "description": "Stable global speaker id: 'teacher', 'student_1', ...",
+          "title": "Id",
+          "type": "string"
+        },
+        "role": {
+          "$ref": "#/$defs/SpeakerRole"
+        },
+        "total_s": {
+          "title": "Total S",
+          "type": "number"
+        },
+        "turn_count": {
+          "title": "Turn Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "role",
+        "total_s",
+        "turn_count"
+      ],
+      "title": "StitchSpeaker",
+      "type": "object"
+    },
+    "Timeline": {
+      "additionalProperties": false,
+      "description": "Render payload for the colored player. Gaps between segments are\nsilence \u2014 the backend emits NO explicit silence rows; the FE paints gaps\ngray. The FE owns the color palette; the backend owns stable ids + roles.",
+      "properties": {
+        "duration_s": {
+          "title": "Duration S",
+          "type": "number"
+        },
+        "recording_id": {
+          "format": "uuid",
+          "title": "Recording Id",
+          "type": "string"
+        },
+        "segments": {
+          "items": {
+            "$ref": "#/$defs/TimelineSegment"
+          },
+          "title": "Segments",
+          "type": "array"
+        },
+        "speakers": {
+          "items": {
+            "$ref": "#/$defs/TimelineSpeaker"
+          },
+          "title": "Speakers",
+          "type": "array"
+        }
+      },
+      "required": [
+        "recording_id",
+        "duration_s",
+        "speakers",
+        "segments"
+      ],
+      "title": "Timeline",
+      "type": "object"
+    },
+    "TimelineSegment": {
+      "additionalProperties": false,
+      "properties": {
+        "end": {
+          "title": "End",
+          "type": "number"
+        },
+        "speaker_id": {
+          "title": "Speaker Id",
+          "type": "string"
+        },
+        "start": {
+          "title": "Start",
+          "type": "number"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "start",
+        "end",
+        "speaker_id",
+        "text"
+      ],
+      "title": "TimelineSegment",
+      "type": "object"
+    },
+    "TimelineSpeaker": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "description": "Stable global speaker id: 'teacher', 'student_1', ...",
+          "title": "Id",
+          "type": "string"
+        },
+        "role": {
+          "$ref": "#/$defs/SpeakerRole"
+        },
+        "total_s": {
+          "title": "Total S",
+          "type": "number"
+        }
+      },
+      "required": [
+        "id",
+        "role",
+        "total_s"
+      ],
+      "title": "TimelineSpeaker",
+      "type": "object"
+    },
+    "TranscribeChunkJob": {
+      "additionalProperties": false,
+      "description": "Map job: transcribe + diarize + embed one window of the canonical WAV.",
+      "properties": {
+        "chunk_index": {
+          "title": "Chunk Index",
+          "type": "integer"
+        },
+        "end_s": {
+          "title": "End S",
+          "type": "number"
+        },
+        "expected_speakers": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Total distinct speakers expected, INCLUDING the teacher.",
+          "title": "Expected Speakers"
+        },
+        "recording_id": {
+          "format": "uuid",
+          "title": "Recording Id",
+          "type": "string"
+        },
+        "start_s": {
+          "title": "Start S",
+          "type": "number"
+        },
+        "target_sr": {
+          "title": "Target Sr",
+          "type": "integer"
+        },
+        "wav_uri": {
+          "title": "Wav Uri",
+          "type": "string"
+        }
+      },
+      "required": [
+        "recording_id",
+        "chunk_index",
+        "wav_uri",
+        "start_s",
+        "end_s",
+        "target_sr"
+      ],
+      "title": "TranscribeChunkJob",
+      "type": "object"
+    },
+    "Turn": {
+      "additionalProperties": false,
+      "properties": {
+        "embedding": {
+          "description": "ECAPA speaker embedding. Exactly 192 floats \u2014 enforced in Python; JSON Schema / TS see a plain number[].",
+          "items": {
+            "type": "number"
+          },
+          "title": "Embedding",
+          "type": "array"
+        },
+        "end": {
+          "title": "End",
+          "type": "number"
+        },
+        "local_speaker": {
+          "title": "Local Speaker",
+          "type": "string"
+        },
+        "start": {
+          "title": "Start",
+          "type": "number"
+        }
+      },
+      "required": [
+        "start",
+        "end",
+        "local_speaker",
+        "embedding"
+      ],
+      "title": "Turn",
+      "type": "object"
+    },
+    "Word": {
+      "additionalProperties": false,
+      "properties": {
+        "end": {
+          "title": "End",
+          "type": "number"
+        },
+        "start": {
+          "title": "Start",
+          "type": "number"
+        },
+        "word": {
+          "title": "Word",
+          "type": "string"
+        }
+      },
+      "required": [
+        "start",
+        "end",
+        "word"
+      ],
+      "title": "Word",
+      "type": "object"
+    }
+  },
+  "description": "Generated from the contracts package v0.1.0. Do not edit by hand \u2014 edit contracts/src/contracts/ and run `make contracts`.",
+  "title": "cu-bootcamp-yadro wire contracts"
+}

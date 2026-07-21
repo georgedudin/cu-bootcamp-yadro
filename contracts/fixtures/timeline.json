@@ -1,0 +1,20 @@
+{
+  "recording_id": "7f9d3e04-2b1c-4b6e-9a70-5a1f6d2c8e11",
+  "duration_s": 100.0,
+  "speakers": [
+    { "id": "teacher", "role": "teacher", "total_s": 61.5 },
+    { "id": "student_1", "role": "student", "total_s": 9.4 },
+    { "id": "student_2", "role": "student", "total_s": 4.1 }
+  ],
+  "segments": [
+    { "start": 0.8, "end": 12.4, "speaker_id": "teacher", "text": "Good morning everyone, today we continue with linear operators." },
+    { "start": 13.0, "end": 15.2, "speaker_id": "student_1", "text": "Will this be on the exam?" },
+    { "start": 15.9, "end": 34.7, "speaker_id": "teacher", "text": "Yes. Let's recall the definition of an eigenvalue first." },
+    { "start": 35.5, "end": 37.1, "speaker_id": "student_2", "text": "Could you repeat that?" },
+    { "start": 38.0, "end": 61.2, "speaker_id": "teacher", "text": "Of course. A scalar lambda is an eigenvalue of A if there is a nonzero vector v with A v equal to lambda v." },
+    { "start": 62.4, "end": 66.3, "speaker_id": "student_1", "text": "So the null space of A minus lambda I is nontrivial." },
+    { "start": 67.0, "end": 75.9, "speaker_id": "teacher", "text": "Exactly. Now let's compute the characteristic polynomial." },
+    { "start": 77.2, "end": 79.7, "speaker_id": "student_2", "text": "Is the determinant always a polynomial in lambda?" },
+    { "start": 80.4, "end": 99.1, "speaker_id": "teacher", "text": "Good question — yes, of degree n. Let's see why on the board." }
+  ]
+}
