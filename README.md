@@ -8,7 +8,6 @@ and keeps every speaker's ID stable across the whole recording. Full design:
 
 ```bash
 make up      # builds + starts the whole stack in docker
-make demo    # end-to-end smoke: generate mp3 -> upload -> poll -> timeline
 ```
 
 - Frontend (nginx): <http://localhost:8080> — upload an mp3, watch progress
@@ -24,7 +23,7 @@ barrier → stitch → timeline) is real.
 | Area | Owner | Where you type |
 |------|-------|----------------|
 | Backend / orchestration / infra | George | `backend/`, `core/`, `ml/glue.py` + `ml/worker.py`, `infra/` |
-| ML pipeline | **Friend A** | `ml/src/ml/pipeline/` — replace the stub, keep the two pure signatures (see `pipeline/__init__.py`) |
+| ML pipeline | **Friend A** | `ml/src/ml/pipeline/` — start at [`ml/README.md`](ml/README.md); replace the stub, keep the two pure signatures |
 | Frontend | **Friend B** | `frontend/` — see `frontend/README.md`; types in `contracts/generated/contracts.ts` |
 
 The seams (locked in `docs/architecture.md` §5): Friend A's functions are
@@ -98,7 +97,7 @@ contracts/  wire types (Pydantic -> JSON Schema -> TS) + fixtures
 core/       shared DB layer: models, session, atomic barrier, Alembic
 backend/    FastAPI: 5 endpoints, ffmpeg decode-once ingest, RQ enqueue
 ml/         worker (RQ SimpleWorker) + DB glue + pipeline/ (Friend A's seam)
-frontend/   placeholder page (Friend B's SPA lands here)
+frontend/   React + Vite SPA (Friend B) — see frontend/README.md
 infra/      docker-compose, Dockerfiles, nginx, .env.example
 ```
 

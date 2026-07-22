@@ -6,7 +6,7 @@ export UV_PROJECT_ENVIRONMENT ?= $(HOME)/.venvs/cu-bootcamp-yadro
 VENV    := $(UV_PROJECT_ENVIRONMENT)
 COMPOSE := docker compose -f infra/docker-compose.yml
 
-.PHONY: up down logs ps demo sync test contracts contracts-check
+.PHONY: up down sync test contracts contracts-check
 
 ## --- the stack --------------------------------------------------------------
 up:            ## build + start everything (frontend on :8080, api on :8000)
@@ -14,15 +14,6 @@ up:            ## build + start everything (frontend on :8080, api on :8000)
 
 down:          ## stop everything (add V=1 to also drop volumes)
 	$(COMPOSE) down $(if $(V),-v)
-
-logs:
-	$(COMPOSE) logs -f --tail 100
-
-ps:
-	$(COMPOSE) ps
-
-demo:          ## end-to-end smoke test: generate mp3 -> upload -> poll -> timeline
-	./scripts/demo.sh
 
 ## --- local python (unit tests, contracts codegen) ---------------------------
 sync:

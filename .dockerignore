@@ -1,0 +1,9 @@
+# All images build from the repo root (see infra/docker-compose.yml).
+# frontend/node_modules is critical: without it, a local `npm install` on a Mac
+# would COPY host-native binaries (esbuild/rollup) into the linux build stage.
+.git
+**/__pycache__
+.pytest_cache
+blob/
+frontend/node_modules
+frontend/dist
