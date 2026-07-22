@@ -38,6 +38,13 @@ PHRASES = [
 
 SIMULATED_GPU_SECONDS = 0.5  # keeps the FE progress bar honest during demos
 
+# Generated turns stay this far inside the chunk window. Unlike real ASR, the
+# stub fabricates each window independently, so a turn in the overlap seam has
+# no duplicate in the neighboring chunk — stitch's seam-dedupe would drop it
+# outright, and a speaker whose only turns sit in seams becomes a speechless
+# (hence nameless) splinter cluster under a forced expected_speakers count.
+SEAM_MARGIN_S = 2.6
+
 
 def _speaker_direction(global_speaker: int) -> list[float]:
     """A fixed unit vector per TRUE speaker — chunk-independent, so clustering
@@ -62,16 +69,24 @@ def transcribe_chunk(job: TranscribeChunkJob) -> ChunkResult:
     n_speakers = job.expected_speakers or 3  # teacher + 2 students by default
     segments: list[ChunkSegment] = []
     turns: list[Turn] = []
-    cursor = job.start_s
+    gen_end = job.end_s - SEAM_MARGIN_S
+    cursor = job.start_s + (SEAM_MARGIN_S if job.chunk_index else 0.0)
     local_labels: dict[int, str] = {}
+    student_cycle = 0
 
-    while cursor < job.end_s - 1.0:
-        # teacher (global speaker 0) dominates; students interject briefly
+    while cursor < gen_end - 1.0:
+        # teacher (global speaker 0) dominates; students interject briefly.
+        # Students are CYCLED, not sampled, so every expected speaker actually
+        # speaks in every chunk — random sampling can starve one out entirely.
         is_teacher = rng.random() < 0.6
-        speaker = 0 if is_teacher else rng.randrange(1, n_speakers)
+        if is_teacher:
+            speaker = 0
+        else:
+            speaker = 1 + student_cycle % (n_speakers - 1)
+            student_cycle += 1
         length = rng.uniform(6.0, 12.0) if is_teacher else rng.uniform(1.5, 4.0)
         start = cursor
-        end = min(cursor + length, job.end_s)
+        end = min(cursor + length, gen_end)
         local = local_labels.setdefault(speaker, f"SPEAKER_{len(local_labels):02d}")
 
         text = PHRASES[rng.randrange(len(PHRASES))]
