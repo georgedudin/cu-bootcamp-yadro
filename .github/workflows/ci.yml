@@ -15,13 +15,18 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v9.0.0  # no floating major tag exists for this action
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@v7.0.0  # pin exact, same policy as setup-uv
         with:
-          node-version: 20
+          node-version: 22  # matches node:22-alpine in the frontend image
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
       - name: Unit tests
         run: make test
       - name: Contracts drift gate
         run: make contracts-check
+      - name: Frontend build
+        working-directory: frontend
+        run: npm ci && npm run build
 
   deploy:
     needs: test
