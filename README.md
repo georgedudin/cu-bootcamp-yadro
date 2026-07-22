@@ -4,103 +4,109 @@ On-prem service that transcribes lecture audio chunk-by-chunk (faster-whisper)
 and keeps every speaker's ID stable across the whole recording. Full design:
 [`docs/architecture.md`](docs/architecture.md) · graded brief: [`docs/task.md`](docs/task.md).
 
-## Run it
+**Status:** deployed to the bootcamp box with auto-deploy from `main`. Backend,
+orchestration and frontend are real end-to-end; the ML pipeline is a CPU stub
+until the real one lands. The box URL is pinned in the team chat — the repo is
+public, so no IPs/ports here.
+
+## Golden rules
+
+1. **Never commit to `main` directly.** Branch → PR → CI green → merge.
+2. **Merging to `main` redeploys the shared box within ~2 min.** Merge means
+   "ship it" — if you're not ready to see it live, don't merge.
+3. CI gates every PR: pytest · contracts drift · frontend build. Red = fix first.
+4. **Tests must be deterministic** — no random/uuid/time-seeded data, ever.
+5. Broke prod? `git revert` the commit on `main` and push — the pipeline
+   redeploys the previous state. Never hotfix on the server.
+6. Wire types change only in `contracts/src/contracts/` + `make contracts`
+   in the same PR — never edit generated files by hand.
+
+## Your lane
+
+| Area | Owner | Start here |
+|------|-------|-----------|
+| ML pipeline | **Friend A** | [`ml/README.md`](ml/README.md) — implement 2 pure functions, flip 1 import |
+| Frontend | **Friend B** | [`frontend/README.md`](frontend/README.md) — working SPA, rework at will |
+| Backend / infra / merges | George | `backend/`, `core/`, ml glue + worker, `infra/`, CI |
+
+What's left (as of 2026-07-22):
+
+- **Friend A:** real `transcribe_chunk` + `stitch` (faster-whisper + pyannote +
+  ECAPA + clustering), then the GPU bits — grep `FRIEND A` in `infra/`.
+- **Friend B:** rework the SPA however you like; the 5 endpoints and rendering
+  rules in `frontend/README.md` are the only fixed parts.
+- Cross-cutting: nothing — contracts are locked, the whole loop runs with the stub.
+
+## Run it locally
 
 ```bash
-make up      # builds + starts the whole stack in docker
+make up      # full stack in docker: UI http://localhost:8080, API :8000
+make down    # stop (V=1 also wipes DB/blob volumes)
+make test    # python unit tests (contracts, core, backend, ml)
 ```
 
-- Frontend (nginx): <http://localhost:8080> — upload an mp3, watch progress
-- API direct: <http://localhost:8000/api/health> · docs at `/docs`
+Requires Docker; nothing else. Upload an mp3 in the UI and watch it walk
+`uploaded → queued → processing n/m → stitching → done`, then click the row
+for the timeline + transcript.
 
-`make down` stops it (`make down V=1` also wipes the DB/blob volumes).
-Requires Docker; nothing else. The ML worker is currently a **CPU stub** that
-produces schema-valid fake transcripts — the whole loop (upload → chunks →
-barrier → stitch → timeline) is real.
+Frontend dev loop (hot reload):
 
-## Who owns what
+```bash
+make up                                    # API on :8000
+cd frontend && npm install && npm run dev  # Vite proxies /api -> :8000
+```
 
-| Area | Owner | Where you type |
-|------|-------|----------------|
-| Backend / orchestration / infra | George | `backend/`, `core/`, `ml/glue.py` + `ml/worker.py`, `infra/` |
-| ML pipeline | **Friend A** | `ml/src/ml/pipeline/` — start at [`ml/README.md`](ml/README.md); replace the stub, keep the two pure signatures |
-| Frontend | **Friend B** | `frontend/` — see `frontend/README.md`; types in `contracts/generated/contracts.ts` |
+Need a test file?
+`ffmpeg -f lavfi -i "sine=frequency=440:duration=100" -q:a 9 lecture.mp3`
 
-The seams (locked in `docs/architecture.md` §5): Friend A's functions are
-pure `(job) -> ChunkResult` / `(results, windows, ...) -> StitchResult` and
-depend only on `contracts/` — all DB/queue plumbing is George's glue. Friend B
-talks to 5 REST endpoints and polls; no CORS, no websockets.
+macOS note: `make test` keeps the venv in `~/.venvs/cu-bootcamp-yadro`, not
+`./.venv` — iCloud + uv mark in-repo venv files hidden and Python 3.13 then
+silently skips `.pth` files.
 
-## Contracts workflow
+## Ship & check prod
+
+1. Merge the PR → watch the **Actions** tab: `test` then `deploy` (~1–2 min).
+2. Open the box UI (URL in team chat); `/api/health` must answer `ok`.
+3. Smoke it: upload an mp3 → status walks to `done` → timeline renders.
+4. DB/blob volumes persist across deploys; Alembic migrations run at backend
+   startup. Host ports live in the server's `infra/.env` (six teams share the
+   box — don't squat defaults). Deploy secrets live only in GitHub Actions.
+
+Manual/emergency deploy: SSH in, `cd ~/cu-bootcamp-yadro && git pull && bash
+scripts/deploy.sh`.
+
+## Contracts workflow (the one shared seam)
 
 Pydantic models in `contracts/src/contracts/` are the single source of truth.
 
 ```bash
 make contracts        # regenerate schema/ + generated/contracts.ts
 make contracts-check  # CI gate: artifacts must match the models (git diff)
-make test             # unit tests (barrier, chunking, stitch identity)
 ```
 
-Generated artifacts are **committed** so Friend B never needs Python.
+Generated artifacts are **committed** (Friend B never needs Python). Changed a
+model? Regenerate and commit in the same PR, or CI goes red.
 
-## GPU notes
+## GPU (Friend A's lane, but everyone should know)
 
-**Requirement: the code stays 1080-friendly.** The baseline GPU target is a
-GTX 1080 (Pascal, compute capability 6.1), so `ASR_COMPUTE_TYPE=int8` is the
-default everywhere: **float16 will not run on Pascal** (CTranslate2 needs
-CC ≥ 7.0; int8 is explicitly supported on 6.1 —
-[CTranslate2 quantization docs](https://opennmt.net/CTranslate2/quantization.html)).
+**The code stays 1080-friendly: `ASR_COMPUTE_TYPE=int8` is the default.**
+Pascal (CC 6.1) can't run float16 — CTranslate2 needs CC ≥ 7.0
+([quantization docs](https://opennmt.net/CTranslate2/quantization.html)). The
+bootcamp box (RTX A4000, shared by 6 teams) may opt into float16 via
+`infra/.env` — never in code defaults. Full checklist: `ml/README.md` + grep
+`FRIEND A` in `infra/`.
 
-The *current* bootcamp box is an RTX A4000 (Ampere, CC 8.6, 16 GB VRAM,
-**shared by 6 teams**): float16 works there and may be enabled per-deployment
-via `infra/.env` — but int8 stays the default (Pascal-safe, and half the VRAM
-on a GPU five other teams are using).
-
-Everything GPU is wired but commented until Friend A's real pipeline lands —
-grep `FRIEND A` in `infra/`:
-
-- GPU device reservation + offline HF env: `infra/docker-compose.yml`
-- CUDA base image + weight baking: `infra/dockerfiles/ml.Dockerfile`
-- pyannote is HF-gated: accept conditions once, bake weights into the image,
-  run with `HF_HUB_OFFLINE=1` (no runtime fetches on the box)
-
-Dev machines are Macs — **images are always built on the deploy server**
-(arm64 images won't run there; the CI/CD flow below does exactly that). The
-stub worker keeps the Mac loop fully functional.
-
-## Deployment & CI/CD
-
-The stack runs on the shared bootcamp server; **every push to `main`
-redeploys it** (`.github/workflows/ci.yml`):
-
-```
-PR            -> test job  (pytest + contracts drift gate)
-push to main  -> test job  -> deploy job: SSH to the server,
-                 git reset --hard origin/main, docker compose up -d --build,
-                 gate on /api/health, prune dangling images
-```
-
-- Secrets (`DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`) live only in GitHub
-  Actions secrets; the deploy key is a dedicated CI keypair, not a personal one.
-- Host ports on the shared box are set in the server's `infra/.env`
-  (`YADRO_HTTP_PORT`, `YADRO_API_PORT`) — six teams, don't squat defaults.
-- **Rollback** = `git revert` the bad commit on `main` and push; the pipeline
-  redeploys the previous state. DB volumes persist across deploys; migrations
-  run automatically at backend startup.
-- Manual/emergency deploy: SSH in, `cd ~/cu-bootcamp-yadro && git pull &&
-  bash scripts/deploy.sh`.
+Dev machines are Macs — images are always built on the deploy server (arm64
+images won't run there); the CPU stub keeps the local loop fully functional.
 
 ## Repo map
 
 ```
-contracts/  wire types (Pydantic -> JSON Schema -> TS) + fixtures
+contracts/  wire types (Pydantic -> JSON Schema -> TS) + fixtures — the locked seams
 core/       shared DB layer: models, session, atomic barrier, Alembic
 backend/    FastAPI: 5 endpoints, ffmpeg decode-once ingest, RQ enqueue
-ml/         worker (RQ SimpleWorker) + DB glue + pipeline/ (Friend A's seam)
-frontend/   React + Vite SPA (Friend B) — see frontend/README.md
+ml/         worker (RQ SimpleWorker) + DB glue + pipeline/ (Friend A) — ml/README.md
+frontend/   React+Vite SPA (Friend B) — frontend/README.md
 infra/      docker-compose, Dockerfiles, nginx, .env.example
+docs/       architecture.md (the design contract) · task.md (graded brief)
 ```
-
-Local venv note (macOS): `make test` keeps the venv in
-`~/.venvs/cu-bootcamp-yadro`, not `./.venv` — iCloud-synced folders + uv mark
-venv files hidden, and Python 3.13 silently skips hidden `.pth` files.
