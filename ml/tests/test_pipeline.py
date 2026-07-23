@@ -1,16 +1,23 @@
 """The graded property: speaker identity is stable ACROSS chunks even though
 chunk-local labels are arbitrary (chunk 1's SPEAKER_00 may be chunk 2's
-SPEAKER_01). The stub embeddings are real enough to exercise this end-to-end."""
+SPEAKER_01). Synthetic embeddings exercise the REAL stitch logic end-to-end."""
 
+import random
 import uuid
 
-from contracts import ChunkResult, ChunkSegment, ChunkWindow, Turn
+from contracts import EMBEDDING_DIM, ChunkResult, ChunkSegment, ChunkWindow, Turn
 from ml.pipeline import stitch
-from ml.pipeline.stub import _speaker_direction
+from ml.pipeline.engine import _normalise
 
 # Hand-crafted inputs only — NO randomness in CI tests, ever. (A previous
 # version generated random stub data here and flaked in CI.)
 REC = uuid.UUID("7f9d3e04-2b1c-4b6e-9a70-5a1f6d2c8e11")
+
+
+def _speaker_direction(speaker: int) -> list[float]:
+    """Deterministic (fixed-seed) unit vector standing in for a real embedding."""
+    rng = random.Random(0x5EED + speaker)
+    return _normalise([rng.gauss(0.0, 1.0) for _ in range(EMBEDDING_DIM)])
 
 
 def _turn(start, end, local, true_speaker):
@@ -67,3 +74,20 @@ def test_seam_copies_are_deduped():
     out = stitch(results, windows, expected_speakers=None, duration_s=85)
 
     assert [s.text for s in out.segments] == ["body", "seam sentence", "tail"]
+
+
+def test_expected_speakers_above_observations_clamps_instead_of_failing():
+    # Upload hint says 2 speakers, but the audio only produced ONE chunk-local
+    # observation. This must degrade to a smaller speaker set, not fail the
+    # whole recording (it used to raise and mark the recording failed).
+    results = [
+        ChunkResult(recording_id=REC, chunk_index=0,
+            segments=[_seg(0, 30, "SPEAKER_00", "only voice")],
+            turns=[_turn(0, 30, "SPEAKER_00", true_speaker=0)]),
+    ]
+    windows = [ChunkWindow(chunk_index=0, start_s=0, end_s=45)]
+
+    out = stitch(results, windows, expected_speakers=2, duration_s=45)
+
+    assert [s.id for s in out.speakers] == ["teacher"]
+    assert [s.speaker_id for s in out.segments] == ["teacher"]

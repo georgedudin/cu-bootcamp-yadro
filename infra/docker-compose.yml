@@ -61,31 +61,48 @@ services:
       dockerfile: infra/dockerfiles/ml.Dockerfile
     restart: unless-stopped
     command: ["python", "-m", "ml.worker", "chunks"]
-    environment: *app_env
+    # GPU reservation + offline pins live in docker-compose.gpu.yml (server
+    # overlay, applied by scripts/deploy.sh). This base file stays CPU-safe
+    # for local `make up`. Keep ONE chunk-worker per GPU (SimpleWorker keeps
+    # the models loaded once, in-process).
+    environment:
+      <<: *app_env
+      HF_HOME: /hf
+      ECAPA_CACHE_DIR: /hf/ecapa
+      HF_HUB_OFFLINE: ${HF_HUB_OFFLINE:-0}
+      TRANSFORMERS_OFFLINE: ${TRANSFORMERS_OFFLINE:-0}
+      ML_DEVICE: ${ML_DEVICE:-auto}
+      ASR_MODEL: ${ASR_MODEL:-large-v3}
+      ASR_COMPUTE_TYPE: ${ASR_COMPUTE_TYPE:-int8}  # Pascal-friendly hard default
+      ASR_LANGUAGE: ${ASR_LANGUAGE:-}              # e.g. ru; empty = autodetect per chunk
+      DIARIZATION_MODEL: ${DIARIZATION_MODEL:-pyannote/speaker-diarization-3.1}
     volumes:
       - blob:/blob
+      - hf_cache:/hf
     depends_on:
       backend:
         condition: service_healthy
-    # FRIEND A — GPU wiring (uncomment when the real pipeline lands; needs
-    # NVIDIA Container Toolkit on the host). Keep ONE chunk-worker per GPU.
-    # REQUIREMENT: stay 1080-friendly — int8 default (works on Pascal CC 6.1).
-    # Current shared box is an RTX A4000 (CC 8.6, 16 GB VRAM shared by 6
-    # teams): float16 works THERE as an infra/.env override, but int8 stays
-    # the default (Pascal-safe + half the VRAM on a shared GPU).
-    # environment:
-    #   <<: *app_env
-    #   HF_HUB_OFFLINE: "1"
-    #   TRANSFORMERS_OFFLINE: "1"
-    #   ASR_MODEL: large-v3
-    #   ASR_COMPUTE_TYPE: int8   # GTX 1080 is Pascal CC 6.1: float16 unsupported
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: 1
-    #           capabilities: [gpu]
+
+  # One-shot model download/load gate — never started by `up` (profile).
+  # The ONLY container that sees HF_TOKEN; workers run offline without it.
+  # Deploy: scripts/deploy.sh runs it between build and up.
+  # Local:  docker compose -f infra/docker-compose.yml run --rm ml-warmup
+  ml-warmup:
+    build:
+      context: ..
+      dockerfile: infra/dockerfiles/ml.Dockerfile
+    profiles: ["warmup"]
+    command: ["python", "-m", "ml.warmup"]
+    environment:
+      HF_HOME: /hf
+      ECAPA_CACHE_DIR: /hf/ecapa
+      HF_TOKEN: ${HF_TOKEN:-}
+      ML_DEVICE: ${ML_DEVICE:-auto}
+      ASR_MODEL: ${ASR_MODEL:-large-v3}
+      ASR_COMPUTE_TYPE: ${ASR_COMPUTE_TYPE:-int8}
+      DIARIZATION_MODEL: ${DIARIZATION_MODEL:-pyannote/speaker-diarization-3.1}
+    volumes:
+      - hf_cache:/hf
 
   ml-reduce-worker:
     build:
@@ -114,3 +131,4 @@ volumes:
   pgdata:
   redisdata:
   blob:
+  hf_cache:

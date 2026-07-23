@@ -313,11 +313,19 @@ one worker sees `0`. Never check-then-act without a row lock.
   diarization/embedding path does not — so ffmpeg must be present.)
 - **GPU runtime:** NVIDIA Container Toolkit on the host; **CUDA 12 / cuDNN 9** in the ml image
   (required by faster-whisper's CTranslate2 backend for GPU).
-- **Offline gated models (on-prem):** pre-download the pyannote weights on a connected machine and
-  **bake them into the ml image**; run with `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1` so
-  there is **no runtime HuggingFace fetch** on the air-gapped box. One teammate accepts the HF
-  gating conditions once (for `segmentation-3.0` + the diarization pipeline) and shares the token +
-  cached weights. speechbrain ECAPA is ungated, so embeddings need no token.
+- **Offline gated models (on-prem) — REVISED (2026-07-23, was "bake into the ml image"):** weights
+  live in a named **`hf_cache` volume** (`HF_HOME=/hf`) filled once by an explicit warmup one-shot
+  (`python -m ml.warmup`, the only container that sees `HF_TOKEN`). `scripts/deploy.sh` runs the
+  warmup as a **deploy gate** between `build` and `up`: warm cache → passes offline in ~a minute,
+  cold cache → downloads with the token; failure aborts the deploy with the old workers still
+  serving. Workers run with `HF_HUB_OFFLINE=1` + `TRANSFORMERS_OFFLINE=1` and **`ML_DEVICE=cuda`
+  pinned** (server overlay `infra/docker-compose.gpu.yml`) so there is **no runtime HuggingFace
+  fetch and no silent CPU fallback**. Rationale for the deviation: no +multi-GB image rebuilds on
+  the shared box, token never enters image layers, and the gate validates the full CUDA stack
+  pre-replacement. One teammate accepts the HF gating conditions once (for `segmentation-3.0` +
+  the diarization pipeline). speechbrain ECAPA is ungated, so embeddings need no token.
+  Note: the deployed diarization default is `pyannote/speaker-diarization-3.1` (tested by the ML
+  implementation; dep pin `pyannote.audio <4`); the community-1 benchmark stays an open ML thread.
 
 ## 9. Risks & mitigations (pre-mortem / roast)
 
@@ -342,8 +350,9 @@ Min-turn-duration policy; low-confidence turns get lumped or left unassigned rat
 phantom speakers.
 
 ### 9.5 pyannote gating × 3 devs + CI + on-prem
-Embeddings use ungated ECAPA; diarization weights are pre-baked offline; the one-time token setup
-is documented. Nobody is blocked on a gating form mid-sprint.
+Embeddings use ungated ECAPA; diarization weights are cached offline in the `hf_cache` volume via
+the warmup gate (see §8); the one-time token setup is documented. Nobody is blocked on a gating
+form mid-sprint.
 
 ### 9.6 200 MB mp3 decode + ffmpeg dependency
 **Decode once** to 16 kHz mono WAV at ingest; keep mp3 only for playback; ffmpeg baked into images.
