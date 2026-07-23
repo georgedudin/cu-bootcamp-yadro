@@ -6,11 +6,14 @@ requires-python = ">=3.11"
 dependencies = [
     "contracts",
     "core",
+    "faster-whisper>=1.2.1",
+    "pyannote.audio>=3.1,<4",
+    "speechbrain>=1.0",
+    "scikit-learn>=1.2",
+    "torch>=2.2",
     "rq>=2.0",
     "redis>=5.0",
 ]
-# Friend A: add the real ML deps here (faster-whisper, pyannote.audio, speechbrain,
-# scikit-learn, torch). Keep them OUT of contracts/core so backend stays lightweight.
 
 [tool.uv.sources]
 contracts = { workspace = true }

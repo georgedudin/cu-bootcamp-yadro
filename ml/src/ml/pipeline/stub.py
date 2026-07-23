@@ -1,15 +1,22 @@
-"""Fake ML with the REAL pipeline shape. Runs on CPU in ~a second per chunk.
+"""Speech recognition, chunk diarization and cross-chunk speaker stitching.
 
-What is fake: the "transcript" is canned text, embeddings are synthetic
-vectors (one fixed direction per true speaker + noise) instead of ECAPA on
-audio. What is real and worth keeping: the chunk-local labeling, the global
-clustering in stitch(), the teacher-by-speech-time rule, and the overlap-seam
-dedupe — Friend A can keep stitch() almost as-is and only swap the map step.
+The heavy ML imports are intentionally lazy: the reduce worker can stitch
+already-computed embeddings without loading Whisper, pyannote or SpeechBrain.
+Models are cached per worker process, which is safe because RQ uses
+``SimpleWorker`` and also avoids reloading several gigabytes for every chunk.
 """
 
+from __future__ import annotations
+
 import math
+import os
 import random
-import time
+import re
+import wave
+from collections import defaultdict
+from functools import lru_cache
+from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 from contracts import (
     ChunkResult,
@@ -25,164 +32,443 @@ from contracts import (
     Word,
 )
 
-PHRASES = [
-    "So today we continue with linear operators.",
-    "Notice how the determinant behaves under row operations.",
-    "Could you repeat the last step, please?",
-    "This is exactly why the kernel matters.",
-    "I think the answer is the identity matrix.",
-    "Let us look at a concrete example on the board.",
-    "Does this hold for complex eigenvalues as well?",
-    "Remember this trick — it will appear in the exam.",
-]
-
-SIMULATED_GPU_SECONDS = 0.5  # keeps the FE progress bar honest during demos
-
-# Generated turns stay this far inside the chunk window. Unlike real ASR, the
-# stub fabricates each window independently, so a turn in the overlap seam has
-# no duplicate in the neighboring chunk — stitch's seam-dedupe would drop it
-# outright, and a speaker whose only turns sit in seams becomes a speechless
-# (hence nameless) splinter cluster under a forced expected_speakers count.
-SEAM_MARGIN_S = 2.6
+_MIN_EMBEDDING_AUDIO_S = 0.5
+_DEFAULT_CLUSTER_DISTANCE = 0.72
 
 
-def _speaker_direction(global_speaker: int) -> list[float]:
-    """A fixed unit vector per TRUE speaker — chunk-independent, so clustering
-    in stitch() genuinely reassembles identities across chunks."""
-    rng = random.Random(f"speaker-{global_speaker}")
-    v = [rng.gauss(0, 1) for _ in range(EMBEDDING_DIM)]
-    norm = math.sqrt(sum(x * x for x in v))
-    return [x / norm for x in v]
+def _speaker_direction(speaker: int) -> list[float]:
+    """Return a deterministic unit vector used by the lightweight CI tests."""
+    rng = random.Random(0x5EED + speaker)
+    vector = [rng.gauss(0.0, 1.0) for _ in range(EMBEDDING_DIM)]
+    return _normalise(vector)
 
 
-def _noisy(direction: list[float], rng: random.Random) -> list[float]:
-    v = [x + rng.gauss(0, 0.05) for x in direction]
-    norm = math.sqrt(sum(x * x for x in v))
-    return [x / norm for x in v]
+def _normalise(vector: list[float]) -> list[float]:
+    norm = math.sqrt(sum(value * value for value in vector))
+    if norm <= 1e-12:
+        return [0.0] * len(vector)
+    return [value / norm for value in vector]
+
+
+def _local_wav_path(uri: str) -> Path:
+    # urlparse treats ``C:\audio.wav`` as URI scheme ``c``.
+    if re.match(r"^[A-Za-z]:[\\/]", uri):
+        return Path(uri)
+    parsed = urlparse(uri)
+    if parsed.scheme not in ("", "file"):
+        raise ValueError(f"wav_uri must be a local path or file URI, got {parsed.scheme!r}")
+    if parsed.scheme == "file":
+        # url2pathname is platform-dependent and turns /C:/... into C:/... on
+        # Windows. Importing it lazily keeps this module platform-neutral.
+        from urllib.request import url2pathname
+
+        path = url2pathname(unquote(parsed.path))
+        if parsed.netloc:
+            path = f"//{parsed.netloc}{path}"
+        return Path(path)
+    return Path(uri)
+
+
+def _read_wav_window(job: TranscribeChunkJob):
+    """Read only the requested PCM window and return mono float32 samples."""
+    import numpy as np
+
+    path = _local_wav_path(job.wav_uri)
+    with wave.open(str(path), "rb") as wav:
+        sample_rate = wav.getframerate()
+        channels = wav.getnchannels()
+        sample_width = wav.getsampwidth()
+        if sample_rate != job.target_sr:
+            raise ValueError(
+                f"Expected {job.target_sr} Hz canonical WAV, got {sample_rate} Hz"
+            )
+        if sample_width not in (1, 2, 3, 4):
+            raise ValueError(f"Unsupported PCM sample width: {sample_width} bytes")
+
+        first_frame = max(0, round(job.start_s * sample_rate))
+        last_frame = min(wav.getnframes(), round(job.end_s * sample_rate))
+        wav.setpos(min(first_frame, wav.getnframes()))
+        raw = wav.readframes(max(0, last_frame - first_frame))
+
+    if sample_width == 1:
+        samples = (np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 128.0) / 128.0
+    elif sample_width == 2:
+        samples = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
+    elif sample_width == 3:
+        packed = np.frombuffer(raw, dtype=np.uint8).reshape(-1, 3)
+        values = (
+            packed[:, 0].astype(np.int32)
+            | (packed[:, 1].astype(np.int32) << 8)
+            | (packed[:, 2].astype(np.int32) << 16)
+        )
+        values = np.where(values & 0x800000, values - 0x1000000, values)
+        samples = values.astype(np.float32) / 8388608.0
+    else:
+        samples = np.frombuffer(raw, dtype="<i4").astype(np.float32) / 2147483648.0
+
+    if channels > 1:
+        samples = samples.reshape(-1, channels).mean(axis=1)
+    return np.ascontiguousarray(samples, dtype=np.float32), sample_rate
+
+
+def _device() -> str:
+    configured = os.getenv("ML_DEVICE", "auto").lower()
+    if configured != "auto":
+        return configured
+    import torch
+
+    return "cuda" if torch.cuda.is_available() else "cpu"
+
+
+@lru_cache(maxsize=4)
+def _whisper_model(model_name: str, device: str, compute_type: str):
+    from faster_whisper import WhisperModel
+
+    return WhisperModel(model_name, device=device, compute_type=compute_type)
+
+
+@lru_cache(maxsize=2)
+def _diarization_pipeline(model_name: str, device: str):
+    # torchaudio 2.9 removed its legacy metadata/backend names while
+    # pyannote.audio 3.x still imports them. This pipeline always passes an
+    # in-memory waveform, so pyannote only needs the names for annotations and
+    # backend selection; no removed torchaudio file-I/O function is called.
+    import torchaudio
+    import torch
+    if not hasattr(torchaudio, "AudioMetaData"):
+        from collections import namedtuple
+
+        torchaudio.AudioMetaData = namedtuple(  # type: ignore[attr-defined]
+            "AudioMetaData",
+            "sample_rate num_frames num_channels bits_per_sample encoding",
+        )
+    if not hasattr(torchaudio, "list_audio_backends"):
+        torchaudio.list_audio_backends = lambda: ["soundfile"]  # type: ignore[attr-defined]
+
+    from pyannote.audio import Pipeline
+
+    token = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_TOKEN")
+    kwargs = {"token": token} if token else {}
+    try:
+        pipeline = Pipeline.from_pretrained(model_name, **kwargs)
+    except TypeError:
+        # pyannote.audio 3.1 / huggingface_hub used the old keyword.
+        kwargs = {"use_auth_token": token} if token else {}
+        pipeline = Pipeline.from_pretrained(model_name, **kwargs)
+    if pipeline is None:
+        raise RuntimeError(
+            f"Could not load gated pyannote model {model_name!r}; "
+            "accept its Hugging Face terms and provide HF_TOKEN"
+        )
+    pipeline.to(torch.device(device))
+    return pipeline
+
+
+@lru_cache(maxsize=2)
+def _speaker_encoder(model_name: str, device: str):
+    try:
+        from speechbrain.inference.speaker import EncoderClassifier
+    except ImportError:  # SpeechBrain < 1.0
+        from speechbrain.pretrained import EncoderClassifier
+
+    savedir = os.getenv("ECAPA_CACHE_DIR")
+    kwargs = {"source": model_name, "run_opts": {"device": device}}
+    if savedir:
+        kwargs["savedir"] = savedir
+    return EncoderClassifier.from_hparams(**kwargs)
+
+
+def _iter_diarization(annotation):
+    # community-1 wraps the Annotation, while speaker-diarization-3.1 returns
+    # the Annotation directly.
+    annotation = getattr(annotation, "speaker_diarization", annotation)
+    for segment, _, label in annotation.itertracks(yield_label=True):
+        yield float(segment.start), float(segment.end), str(label)
+
+
+def _overlap(start_a: float, end_a: float, start_b: float, end_b: float) -> float:
+    return max(0.0, min(end_a, end_b) - max(start_a, start_b))
 
 
 def transcribe_chunk(job: TranscribeChunkJob) -> ChunkResult:
-    # Deterministic per (recording, chunk): retries produce identical results
-    rng = random.Random(f"{job.recording_id}:{job.chunk_index}")
-    time.sleep(SIMULATED_GPU_SECONDS)
+    """Transcribe, diarize and embed one absolute recording window."""
+    import numpy as np
+    import torch
 
-    n_speakers = job.expected_speakers or 3  # teacher + 2 students by default
-    segments: list[ChunkSegment] = []
-    turns: list[Turn] = []
-    gen_end = job.end_s - SEAM_MARGIN_S
-    cursor = job.start_s + (SEAM_MARGIN_S if job.chunk_index else 0.0)
-    local_labels: dict[int, str] = {}
-    student_cycle = 0
-
-    while cursor < gen_end - 1.0:
-        # teacher (global speaker 0) dominates; students interject briefly.
-        # Students are CYCLED, not sampled, so every expected speaker actually
-        # speaks in every chunk — random sampling can starve one out entirely.
-        is_teacher = rng.random() < 0.6
-        if is_teacher:
-            speaker = 0
-        else:
-            speaker = 1 + student_cycle % (n_speakers - 1)
-            student_cycle += 1
-        length = rng.uniform(6.0, 12.0) if is_teacher else rng.uniform(1.5, 4.0)
-        start = cursor
-        end = min(cursor + length, gen_end)
-        local = local_labels.setdefault(speaker, f"SPEAKER_{len(local_labels):02d}")
-
-        text = PHRASES[rng.randrange(len(PHRASES))]
-        words = text.split()
-        step = (end - start) / len(words)
-        segments.append(
-            ChunkSegment(
-                start=round(start, 2), end=round(end, 2), text=text, local_speaker=local,
-                words=[
-                    Word(
-                        start=round(start + i * step, 2),
-                        end=round(start + (i + 1) * step, 2),
-                        word=w,
-                    )
-                    for i, w in enumerate(words)
-                ],
-            )
+    audio, sample_rate = _read_wav_window(job)
+    if audio.size == 0:
+        return ChunkResult(
+            recording_id=job.recording_id,
+            chunk_index=job.chunk_index,
+            segments=[],
+            turns=[],
         )
+
+    device = _device()
+    whisper = _whisper_model(
+        os.getenv("ASR_MODEL", "large-v3"),
+        device,
+        os.getenv("ASR_COMPUTE_TYPE", "int8"),
+    )
+    asr_segments, _ = whisper.transcribe(
+        audio,
+        language=os.getenv("ASR_LANGUAGE") or None,
+        word_timestamps=True,
+        vad_filter=True,
+        beam_size=int(os.getenv("ASR_BEAM_SIZE", "5")),
+    )
+    # faster-whisper returns a generator; consume it before reusing the audio
+    # in the other models.
+    asr_segments = list(asr_segments)
+
+    waveform = torch.from_numpy(audio).unsqueeze(0)
+    diarizer = _diarization_pipeline(
+        os.getenv("DIARIZATION_MODEL", "pyannote/speaker-diarization-3.1"),
+        device,
+    )
+    diarization = diarizer({"waveform": waveform, "sample_rate": sample_rate})
+    local_turns = list(_iter_diarization(diarization))
+    if not local_turns:
+        # Rare fallback for a failed/empty diarization pass: keep the ASR
+        # usable and derive one local voice from its detected speech regions.
+        local_turns = [
+            (float(segment.start), float(segment.end), "SPEAKER_00")
+            for segment in asr_segments
+            if float(segment.end) > float(segment.start)
+        ]
+
+    encoder = _speaker_encoder(
+        os.getenv("ECAPA_MODEL", "speechbrain/spkrec-ecapa-voxceleb"),
+        device,
+    )
+    turns: list[Turn] = []
+    for local_start, local_end, label in local_turns:
+        local_start = max(0.0, local_start)
+        local_end = min(len(audio) / sample_rate, local_end)
+        if local_end <= local_start:
+            continue
+        first = int(local_start * sample_rate)
+        last = max(first + 1, int(local_end * sample_rate))
+        clip = audio[first:last]
+        min_samples = max(1, round(_MIN_EMBEDDING_AUDIO_S * sample_rate))
+        if len(clip) < min_samples:
+            clip = np.pad(clip, (0, min_samples - len(clip)))
+        with torch.inference_mode():
+            embedding = encoder.encode_batch(
+                torch.from_numpy(np.ascontiguousarray(clip)).unsqueeze(0).to(device)
+            )
+        vector = embedding.detach().float().cpu().reshape(-1).tolist()
+        if len(vector) != EMBEDDING_DIM:
+            raise RuntimeError(
+                f"ECAPA returned {len(vector)} values; expected {EMBEDDING_DIM}"
+            )
         turns.append(
             Turn(
-                start=round(start, 2), end=round(end, 2), local_speaker=local,
-                embedding=_noisy(_speaker_direction(speaker), rng),
+                start=job.start_s + local_start,
+                end=job.start_s + local_end,
+                local_speaker=label,
+                embedding=_normalise(vector),
             )
         )
-        cursor = end + rng.uniform(0.4, 1.5)  # silence gap
+
+    segments: list[ChunkSegment] = []
+    for segment in asr_segments:
+        local_start = max(0.0, float(segment.start))
+        local_end = min(len(audio) / sample_rate, float(segment.end))
+        if local_end <= local_start:
+            continue
+        overlaps = [
+            (_overlap(local_start, local_end, start, end), label)
+            for start, end, label in local_turns
+        ]
+        if overlaps:
+            local_speaker = max(overlaps, key=lambda item: item[0])[1]
+        else:
+            # This only occurs when pyannote found no speech at all. Keeping a
+            # deterministic label makes the contract useful for downstream
+            # diagnostics instead of silently losing Whisper text.
+            local_speaker = "SPEAKER_00"
+        words = [
+            Word(
+                start=job.start_s + max(0.0, float(word.start)),
+                end=job.start_s + min(len(audio) / sample_rate, float(word.end)),
+                word=word.word,
+            )
+            for word in (segment.words or [])
+            if word.start is not None and word.end is not None
+        ]
+        segments.append(
+            ChunkSegment(
+                start=job.start_s + local_start,
+                end=job.start_s + local_end,
+                text=segment.text.strip(),
+                local_speaker=local_speaker,
+                words=words,
+            )
+        )
 
     return ChunkResult(
-        recording_id=job.recording_id, chunk_index=job.chunk_index,
-        segments=segments, turns=turns,
+        recording_id=job.recording_id,
+        chunk_index=job.chunk_index,
+        segments=segments,
+        turns=turns,
     )
 
 
-# --- reduce ----------------------------------------------------------------
-
-
-def _cosine_distance(a: list[float], b: list[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
-    na = math.sqrt(sum(x * x for x in a))
-    nb = math.sqrt(sum(x * x for x in b))
-    return 1.0 - dot / (na * nb)
-
-
-def _mean(vectors: list[list[float]]) -> list[float]:
-    return [sum(col) / len(vectors) for col in zip(*vectors)]
-
-
-def _cluster(
-    reps: list[list[float]], n_clusters: int | None, distance_threshold: float
+def _cluster_representatives(
+    representatives: list[list[float]], expected_speakers: int | None
 ) -> list[int]:
-    """Agglomerative clustering on cosine distance between cluster centroids
-    (the real pipeline uses sklearn AgglomerativeClustering — reimplemented
-    here to keep the stub dependency-free). Centroids are merged as weighted
-    means and pair distances updated incrementally, so a 2-hour lecture's
-    worth of turns clusters in seconds. Returns a cluster id per input."""
-    from itertools import combinations
+    if expected_speakers is not None:
+        if expected_speakers < 1:
+            raise ValueError("expected_speakers must be positive")
+        if expected_speakers > len(representatives):
+            raise ValueError(
+                f"Cannot form {expected_speakers} speakers from only "
+                f"{len(representatives)} chunk-local speaker observations"
+            )
+        kwargs = {"n_clusters": expected_speakers}
+    else:
+        threshold = float(
+            os.getenv("SPEAKER_CLUSTER_DISTANCE", str(_DEFAULT_CLUSTER_DISTANCE))
+        )
+        kwargs = {"n_clusters": None, "distance_threshold": threshold}
+    if len(representatives) == 1:
+        return [0]
 
-    means = {i: list(v) for i, v in enumerate(reps)}
-    sizes = dict.fromkeys(means, 1)
-    root = {i: i for i in means}  # rep index -> current cluster
-    dist = {
-        (i, j): _cosine_distance(means[i], means[j]) for i, j in combinations(means, 2)
-    }
-    while len(means) > 1:
-        if n_clusters is not None and len(means) <= n_clusters:
+    try:
+        from sklearn.cluster import AgglomerativeClustering
+
+        model = AgglomerativeClustering(
+            metric="cosine", linkage="average", **kwargs
+        )
+        return [int(label) for label in model.fit_predict(representatives)]
+    except TypeError:  # scikit-learn < 1.2
+        model = AgglomerativeClustering(
+            affinity="cosine", linkage="average", **kwargs
+        )
+        return [int(label) for label in model.fit_predict(representatives)]
+    except ImportError:
+        return _agglomerative_fallback(
+            representatives,
+            n_clusters=expected_speakers,
+            distance_threshold=(
+                None
+                if expected_speakers is not None
+                else float(
+                    os.getenv(
+                        "SPEAKER_CLUSTER_DISTANCE",
+                        str(_DEFAULT_CLUSTER_DISTANCE),
+                    )
+                )
+            ),
+        )
+
+
+def _agglomerative_fallback(
+    vectors: list[list[float]],
+    n_clusters: int | None,
+    distance_threshold: float | None,
+) -> list[int]:
+    """Small deterministic cosine/average-linkage implementation for CI."""
+    cosine_distance = [
+        [
+            1.0 - sum(left * right for left, right in zip(vectors[i], vectors[j]))
+            for j in range(len(vectors))
+        ]
+        for i in range(len(vectors))
+    ]
+    clusters = [{index} for index in range(len(vectors))]
+
+    def average_distance(left: set[int], right: set[int]) -> float:
+        values = [cosine_distance[i][j] for i in left for j in right]
+        return sum(values) / len(values)
+
+    while len(clusters) > 1:
+        best = min(
+            (
+                (average_distance(clusters[i], clusters[j]), i, j)
+                for i in range(len(clusters))
+                for j in range(i + 1, len(clusters))
+            ),
+            key=lambda item: (item[0], item[1], item[2]),
+        )
+        if n_clusters is not None:
+            if len(clusters) <= n_clusters:
+                break
+        elif distance_threshold is not None and best[0] > distance_threshold:
             break
-        (i, j), d = min(dist.items(), key=lambda kv: kv[1])
-        if n_clusters is None and d > distance_threshold:
-            break
-        wi, wj = sizes[i], sizes[j]
-        means[i] = [(a * wi + b * wj) / (wi + wj) for a, b in zip(means[i], means[j])]
-        sizes[i] = wi + wj
-        del means[j], sizes[j]
-        for r, c in root.items():
-            if c == j:
-                root[r] = i
-        dist = {pair: v for pair, v in dist.items() if j not in pair}
-        for k in means:
-            if k != i:
-                dist[(min(i, k), max(i, k))] = _cosine_distance(means[i], means[k])
-    renumber = {cluster: n for n, cluster in enumerate(sorted(means))}
-    return [renumber[root[r]] for r in range(len(reps))]
+        _, left, right = best
+        clusters[left] |= clusters[right]
+        del clusters[right]
+
+    clusters.sort(key=min)
+    labels = [0] * len(vectors)
+    for label, cluster in enumerate(clusters):
+        for index in cluster:
+            labels[index] = label
+    return labels
 
 
-def _own_ranges(windows: list[ChunkWindow], duration_s: float) -> dict[int, tuple[float, float]]:
-    """Seam dedupe rule: each overlap region is owned half-by-half — the seam
-    midpoint splits it. A segment/turn belongs to the chunk that owns its
-    midpoint; the copy seen by the neighboring chunk is dropped."""
-    ordered = sorted(windows, key=lambda w: w.chunk_index)
-    ranges = {}
-    for prev, cur, nxt in zip(
-        [None] + list(ordered[:-1]), ordered, list(ordered[1:]) + [None]
-    ):
-        lo = 0.0 if prev is None else (cur.start_s + prev.end_s) / 2
-        hi = duration_s if nxt is None else (nxt.start_s + cur.end_s) / 2
-        ranges[cur.chunk_index] = (lo, hi)
-    return ranges
+def _merge_intervals(intervals: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    merged: list[list[float]] = []
+    for start, end in sorted(intervals):
+        if end <= start:
+            continue
+        if merged and start <= merged[-1][1] + 1e-3:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return [(start, end) for start, end in merged]
+
+
+def _normalised_text(text: str) -> str:
+    return re.sub(r"\W+", "", text, flags=re.UNICODE).casefold()
+
+
+def _dedupe_segments(items):
+    """Drop copies produced in overlapping windows, preserving real speech."""
+    from difflib import SequenceMatcher
+
+    kept = []
+    for candidate in sorted(items, key=lambda item: (item["start"], item["chunk"])):
+        duplicate_index = None
+        for index in range(len(kept) - 1, -1, -1):
+            previous = kept[index]
+            if previous["end"] < candidate["start"] - 0.25:
+                break
+            if previous["chunk"] == candidate["chunk"]:
+                continue
+            if _overlap(
+                previous["window_start"],
+                previous["window_end"],
+                candidate["window_start"],
+                candidate["window_end"],
+            ) <= 0:
+                continue
+            overlap = _overlap(
+                previous["start"], previous["end"], candidate["start"], candidate["end"]
+            )
+            shorter = min(
+                previous["end"] - previous["start"],
+                candidate["end"] - candidate["start"],
+            )
+            if shorter <= 0 or overlap / shorter < 0.5:
+                continue
+            left = _normalised_text(previous["text"])
+            right = _normalised_text(candidate["text"])
+            similarity = SequenceMatcher(None, left, right).ratio() if left and right else 0.0
+            if similarity >= 0.8:
+                duplicate_index = index
+                break
+        if duplicate_index is None:
+            kept.append(candidate)
+        else:
+            previous = kept[duplicate_index]
+            # Prefer the copy with more text/words; it is usually the copy
+            # farther from its chunk boundary.
+            if len(candidate["text"]) > len(previous["text"]):
+                kept[duplicate_index] = candidate
+    return sorted(kept, key=lambda item: (item["start"], item["end"]))
 
 
 def stitch(
@@ -191,69 +477,132 @@ def stitch(
     expected_speakers: int | None,
     duration_s: float,
 ) -> StitchResult:
-    # 1. One representative embedding per (chunk, local_speaker) — averaging
-    #    turns stabilizes short utterances before global clustering (§4.3)
-    keys: list[tuple[int, str]] = []
-    reps: list[list[float]] = []
+    """Cluster chunk-local voices and produce stable teacher/student IDs."""
+    if duration_s < 0:
+        raise ValueError("duration_s must be non-negative")
+    if not results:
+        return StitchResult(speakers=[], segments=[])
+    window_by_chunk = {window.chunk_index: window for window in windows}
+
+    # One robust observation per (chunk, local speaker). Local labels can be
+    # arbitrarily permuted in every chunk, so only embeddings cross the seam.
+    grouped_embeddings: dict[tuple[int, str], list[list[float]]] = defaultdict(list)
     for result in results:
-        by_local: dict[str, list[list[float]]] = {}
         for turn in result.turns:
-            by_local.setdefault(turn.local_speaker, []).append(turn.embedding)
-        for local, embeddings in sorted(by_local.items()):
-            keys.append((result.chunk_index, local))
-            reps.append(_mean(embeddings))
-    if not reps:
+            grouped_embeddings[(result.chunk_index, turn.local_speaker)].append(
+                turn.embedding
+            )
+
+    keys = sorted(grouped_embeddings)
+    representatives = []
+    for key in keys:
+        vectors = grouped_embeddings[key]
+        mean = [sum(values) / len(vectors) for values in zip(*vectors)]
+        representatives.append(_normalise(mean))
+
+    if not representatives:
         return StitchResult(speakers=[], segments=[])
 
-    # 2. Global clustering -> stable identity across chunks
-    labels = _cluster(reps, expected_speakers, distance_threshold=0.5)
-    cluster_of: dict[tuple[int, str], int] = dict(zip(keys, labels))
+    labels = _cluster_representatives(representatives, expected_speakers)
+    local_to_cluster = dict(zip(keys, labels))
 
-    # 3. Dedupe overlap seams, then attribute speech time per cluster
-    own = _own_ranges(windows, duration_s)
-    speech_s: dict[int, float] = {}
-    turn_count: dict[int, int] = {}
+    cluster_intervals: dict[int, list[tuple[float, float]]] = defaultdict(list)
+    cluster_first_seen: dict[int, float] = {}
+    mapped_turns: dict[int, list[tuple[float, float, int]]] = defaultdict(list)
     for result in results:
-        lo, hi = own[result.chunk_index]
         for turn in result.turns:
-            mid = (turn.start + turn.end) / 2
-            if lo <= mid < hi:
-                cluster = cluster_of[(result.chunk_index, turn.local_speaker)]
-                speech_s[cluster] = speech_s.get(cluster, 0.0) + (turn.end - turn.start)
-                turn_count[cluster] = turn_count.get(cluster, 0) + 1
-
-    # 4. Teacher = most total speech time (§10); students ranked by speech time
-    ranked = sorted(speech_s, key=lambda c: speech_s[c], reverse=True)
-    names = {
-        cluster: ("teacher" if rank == 0 else f"student_{rank}")
-        for rank, cluster in enumerate(ranked)
-    }
-
-    # 5. Final timeline: deduped segments with global speaker ids
-    segments: list[TimelineSegment] = []
-    for result in results:
-        lo, hi = own[result.chunk_index]
-        for seg in result.segments:
-            mid = (seg.start + seg.end) / 2
-            if not (lo <= mid < hi):
+            cluster = local_to_cluster[(result.chunk_index, turn.local_speaker)]
+            start = max(0.0, min(duration_s, turn.start))
+            end = max(start, min(duration_s, turn.end))
+            if end <= start:
                 continue
-            cluster = cluster_of[(result.chunk_index, seg.local_speaker)]
-            if cluster not in names:
-                continue  # cluster fell entirely into dropped seam copies
-            segments.append(
-                TimelineSegment(
-                    start=seg.start, end=seg.end, speaker_id=names[cluster], text=seg.text
-                )
+            cluster_intervals[cluster].append((start, end))
+            mapped_turns[result.chunk_index].append((start, end, cluster))
+            cluster_first_seen[cluster] = min(
+                cluster_first_seen.get(cluster, start), start
             )
-    segments.sort(key=lambda s: s.start)
 
+    merged_by_cluster = {
+        cluster: _merge_intervals(intervals)
+        for cluster, intervals in cluster_intervals.items()
+    }
+    totals = {
+        cluster: sum(end - start for start, end in intervals)
+        for cluster, intervals in merged_by_cluster.items()
+    }
+    # Clusters with no positive-duration turns are still retained (possible
+    # only with malformed input) but sort after observed speakers.
+    all_clusters = sorted(set(labels))
+    for cluster in all_clusters:
+        totals.setdefault(cluster, 0.0)
+        cluster_first_seen.setdefault(cluster, math.inf)
+
+    teacher_cluster = min(
+        all_clusters,
+        key=lambda cluster: (-totals[cluster], cluster_first_seen[cluster], cluster),
+    )
+    student_clusters = sorted(
+        (cluster for cluster in all_clusters if cluster != teacher_cluster),
+        key=lambda cluster: (cluster_first_seen[cluster], cluster),
+    )
+    cluster_to_id = {teacher_cluster: "teacher"}
+    cluster_to_id.update(
+        {cluster: f"student_{index}" for index, cluster in enumerate(student_clusters, 1)}
+    )
+
+    raw_segments = []
+    for result in results:
+        chunk_turns = mapped_turns[result.chunk_index]
+        window = window_by_chunk.get(result.chunk_index)
+        for segment in result.segments:
+            candidates = [
+                (_overlap(segment.start, segment.end, start, end), cluster)
+                for start, end, cluster in chunk_turns
+            ]
+            positive = [candidate for candidate in candidates if candidate[0] > 0]
+            if positive:
+                cluster = max(positive, key=lambda item: item[0])[1]
+            else:
+                cluster = local_to_cluster.get(
+                    (result.chunk_index, segment.local_speaker), teacher_cluster
+                )
+            raw_segments.append(
+                {
+                    "start": max(0.0, min(duration_s, segment.start)),
+                    "end": max(0.0, min(duration_s, segment.end)),
+                    "text": segment.text,
+                    "cluster": cluster,
+                    "chunk": result.chunk_index,
+                    "window_start": window.start_s if window else segment.start,
+                    "window_end": window.end_s if window else segment.end,
+                }
+            )
+
+    deduped = _dedupe_segments(
+        item for item in raw_segments if item["end"] > item["start"]
+    )
+    timeline = [
+        TimelineSegment(
+            start=item["start"],
+            end=item["end"],
+            speaker_id=cluster_to_id[item["cluster"]],
+            text=item["text"],
+        )
+        for item in deduped
+    ]
+
+    ordered_clusters = [teacher_cluster, *student_clusters]
     speakers = [
         StitchSpeaker(
-            id=names[cluster],
-            role=SpeakerRole.teacher if rank == 0 else SpeakerRole.student,
-            total_s=round(speech_s[cluster], 2),
-            turn_count=turn_count[cluster],
+            id=cluster_to_id[cluster],
+            role=(
+                SpeakerRole.teacher
+                if cluster == teacher_cluster
+                else SpeakerRole.student
+            ),
+            total_s=totals[cluster],
+            turn_count=len(merged_by_cluster.get(cluster, [])),
         )
-        for rank, cluster in enumerate(ranked)
+        for cluster in ordered_clusters
     ]
-    return StitchResult(speakers=speakers, segments=segments)
+    return StitchResult(speakers=speakers, segments=timeline)
