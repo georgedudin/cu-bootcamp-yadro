@@ -3,7 +3,14 @@ name = "yadro-workspace"
 version = "0.1.0"
 description = "Workspace root — see README.md for who owns what"
 requires-python = ">=3.11"
-dependencies = ["contracts", "core", "backend", "ml"]
+dependencies = [
+    "contracts",
+    "core",
+    "backend",
+    "ml",
+    "faster-whisper>=1.2.1",
+    "scikit-learn>=1.9.0",
+]
 
 [tool.uv]
 package = false
