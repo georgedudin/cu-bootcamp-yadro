@@ -1,18 +1,23 @@
 # ml/ — Friend A's lane
 
 You implement **two pure functions**. Everything else in `ml/` (worker, DB, queue,
-retries) is George's glue and already works end-to-end with a stub.
+retries) is George's glue.
 
 ## Your seam
 
-`src/ml/pipeline/__init__.py` currently does:
+The real pipeline lives in `src/ml/pipeline/engine.py`, re-exported by
+`src/ml/pipeline/__init__.py`:
 
 ```python
-from ml.pipeline.stub import stitch, transcribe_chunk
+from ml.pipeline.engine import preload_chunk_models, stitch, transcribe_chunk
 ```
 
-Create `src/ml/pipeline/real.py` with the same two signatures and flip that one
-import. That's the whole integration. Rules of the seam:
+Models load lazily via `lru_cache`d loaders (`get_whisper`/`get_diarizer`/
+`get_encoder`); `preload_chunk_models()` forces all three at worker boot and in
+the deploy warmup gate (`python -m ml.warmup`) so a broken model setup crashes
+loudly instead of churning job retries. Weights come from the `hf_cache`
+volume (`HF_HOME=/hf`) — see `infra/.env.example` for the one-time warmup.
+Rules of the seam:
 
 - **Pure functions** — no DB, no Redis, no queue, no global state you can't rebuild.
 - Depend only on the `contracts` package (and your ML libs).
@@ -73,8 +78,8 @@ raise; after the final retry the recording is marked `failed`.
 
 ## Invariants your `stitch` must keep
 
-`tests/test_stub_pipeline.py` encodes them (they run against the stub today and
-must pass against `real.py` — keep tests deterministic, no randomness):
+`tests/test_pipeline.py` encodes them against the real `stitch` (keep tests
+deterministic, no randomness):
 
 - **Identity survives label flips** — chunk-local labels (`SPEAKER_00`/`01`) may be
   swapped arbitrarily between chunks; global ids must stay stable via embeddings.

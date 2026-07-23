@@ -8,9 +8,9 @@ Models are cached per worker process, which is safe because RQ uses
 
 from __future__ import annotations
 
+import logging
 import math
 import os
-import random
 import re
 import wave
 from collections import defaultdict
@@ -32,15 +32,10 @@ from contracts import (
     Word,
 )
 
+log = logging.getLogger(__name__)
+
 _MIN_EMBEDDING_AUDIO_S = 0.5
 _DEFAULT_CLUSTER_DISTANCE = 0.72
-
-
-def _speaker_direction(speaker: int) -> list[float]:
-    """Return a deterministic unit vector used by the lightweight CI tests."""
-    rng = random.Random(0x5EED + speaker)
-    vector = [rng.gauss(0.0, 1.0) for _ in range(EMBEDDING_DIM)]
-    return _normalise(vector)
 
 
 def _normalise(vector: list[float]) -> list[float]:
@@ -51,15 +46,10 @@ def _normalise(vector: list[float]) -> list[float]:
 
 
 def _local_wav_path(uri: str) -> Path:
-    # urlparse treats ``C:\audio.wav`` as URI scheme ``c``.
-    if re.match(r"^[A-Za-z]:[\\/]", uri):
-        return Path(uri)
     parsed = urlparse(uri)
     if parsed.scheme not in ("", "file"):
         raise ValueError(f"wav_uri must be a local path or file URI, got {parsed.scheme!r}")
     if parsed.scheme == "file":
-        # url2pathname is platform-dependent and turns /C:/... into C:/... on
-        # Windows. Importing it lazily keeps this module platform-neutral.
         from urllib.request import url2pathname
 
         path = url2pathname(unquote(parsed.path))
@@ -157,31 +147,6 @@ def _patch_huggingface_hub_for_pyannote() -> None:
     huggingface_hub.hf_hub_download = compatible_hf_hub_download
 
 
-def _patch_speechbrain_lazy_modules_on_windows() -> None:
-    """Prevent stack inspection from importing optional SpeechBrain modules.
-
-    SpeechBrain 1.1 recognizes POSIX ``/inspect.py`` paths but misses Windows
-    ``\\inspect.py`` paths. Newer Lightning inspects the stack while restoring
-    checkpoints and would otherwise try to import optional packages like k2.
-    """
-    if os.name != "nt":
-        return
-
-    from speechbrain.utils.importutils import LazyModule
-
-    original = LazyModule.__getattr__
-    if getattr(original, "_windows_inspect_compat", False):
-        return
-
-    def compatible_getattr(self, attr):
-        if attr == "__file__":
-            raise AttributeError(attr)
-        return original(self, attr)
-
-    compatible_getattr._windows_inspect_compat = True
-    LazyModule.__getattr__ = compatible_getattr
-
-
 @lru_cache(maxsize=2)
 def _diarization_pipeline(model_name: str, device: str):
     # torchaudio 2.9 removed its legacy metadata/backend names while
@@ -212,7 +177,6 @@ def _diarization_pipeline(model_name: str, device: str):
     torch.serialization.add_safe_globals(
         [TorchVersion, Specifications, Problem, Resolution]
     )
-    _patch_speechbrain_lazy_modules_on_windows()
 
     token = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_TOKEN")
     pipeline = Pipeline.from_pretrained(
@@ -242,6 +206,45 @@ def _speaker_encoder(model_name: str, device: str):
     return EncoderClassifier.from_hparams(**kwargs)
 
 
+# Public loaders: env resolution lives here so warmup / worker-boot preload hit
+# the SAME lru_cache keys the per-job path uses — a preloaded model is never
+# reloaded on the first real chunk.
+
+def get_whisper(device: str | None = None):
+    return _whisper_model(
+        os.getenv("ASR_MODEL", "large-v3"),
+        device or _device(),
+        os.getenv("ASR_COMPUTE_TYPE", "int8"),
+    )
+
+
+def get_diarizer(device: str | None = None):
+    return _diarization_pipeline(
+        os.getenv("DIARIZATION_MODEL", "pyannote/speaker-diarization-3.1"),
+        device or _device(),
+    )
+
+
+def get_encoder(device: str | None = None):
+    return _speaker_encoder(
+        os.getenv("ECAPA_MODEL", "speechbrain/spkrec-ecapa-voxceleb"),
+        device or _device(),
+    )
+
+
+def preload_chunk_models() -> None:
+    """Load ASR + diarization + embedding models once (worker boot / warmup).
+
+    A broken model setup (missing weights, bad CUDA stack, no VRAM) must fail
+    HERE, loudly, instead of surfacing as per-job retry churn."""
+    device = _device()
+    log.info("preloading chunk models on device=%s", device)
+    get_whisper(device)
+    get_diarizer(device)
+    get_encoder(device)
+    log.info("chunk models ready")
+
+
 def _iter_diarization(annotation):
     # community-1 wraps the Annotation, while speaker-diarization-3.1 returns
     # the Annotation directly.
@@ -269,11 +272,7 @@ def transcribe_chunk(job: TranscribeChunkJob) -> ChunkResult:
         )
 
     device = _device()
-    whisper = _whisper_model(
-        os.getenv("ASR_MODEL", "large-v3"),
-        device,
-        os.getenv("ASR_COMPUTE_TYPE", "int8"),
-    )
+    whisper = get_whisper(device)
     asr_segments, _ = whisper.transcribe(
         audio,
         language=os.getenv("ASR_LANGUAGE") or None,
@@ -286,10 +285,7 @@ def transcribe_chunk(job: TranscribeChunkJob) -> ChunkResult:
     asr_segments = list(asr_segments)
 
     waveform = torch.from_numpy(audio).unsqueeze(0)
-    diarizer = _diarization_pipeline(
-        os.getenv("DIARIZATION_MODEL", "pyannote/speaker-diarization-3.1"),
-        device,
-    )
+    diarizer = get_diarizer(device)
     diarization = diarizer({"waveform": waveform, "sample_rate": sample_rate})
     local_turns = list(_iter_diarization(diarization))
     if not local_turns:
@@ -301,10 +297,7 @@ def transcribe_chunk(job: TranscribeChunkJob) -> ChunkResult:
             if float(segment.end) > float(segment.start)
         ]
 
-    encoder = _speaker_encoder(
-        os.getenv("ECAPA_MODEL", "speechbrain/spkrec-ecapa-voxceleb"),
-        device,
-    )
+    encoder = get_encoder(device)
     turns: list[Turn] = []
     for local_start, local_end, label in local_turns:
         local_start = max(0.0, local_start)
@@ -386,11 +379,14 @@ def _cluster_representatives(
         if expected_speakers < 1:
             raise ValueError("expected_speakers must be positive")
         if expected_speakers > len(representatives):
-            raise ValueError(
-                f"Cannot form {expected_speakers} speakers from only "
-                f"{len(representatives)} chunk-local speaker observations"
+            # Upload hint exceeds what the audio produced (short recording,
+            # silent students, ...). Failing the whole recording over a hint
+            # would be worse than a smaller speaker set — clamp and log.
+            log.warning(
+                "expected %d speakers but only %d chunk-local observations — clamping",
+                expected_speakers, len(representatives),
             )
-        kwargs = {"n_clusters": expected_speakers}
+        kwargs = {"n_clusters": min(expected_speakers, len(representatives))}
     else:
         threshold = float(
             os.getenv("SPEAKER_CLUSTER_DISTANCE", str(_DEFAULT_CLUSTER_DISTANCE))
@@ -399,78 +395,10 @@ def _cluster_representatives(
     if len(representatives) == 1:
         return [0]
 
-    try:
-        from sklearn.cluster import AgglomerativeClustering
+    from sklearn.cluster import AgglomerativeClustering
 
-        model = AgglomerativeClustering(
-            metric="cosine", linkage="average", **kwargs
-        )
-        return [int(label) for label in model.fit_predict(representatives)]
-    except TypeError:  # scikit-learn < 1.2
-        model = AgglomerativeClustering(
-            affinity="cosine", linkage="average", **kwargs
-        )
-        return [int(label) for label in model.fit_predict(representatives)]
-    except ImportError:
-        return _agglomerative_fallback(
-            representatives,
-            n_clusters=expected_speakers,
-            distance_threshold=(
-                None
-                if expected_speakers is not None
-                else float(
-                    os.getenv(
-                        "SPEAKER_CLUSTER_DISTANCE",
-                        str(_DEFAULT_CLUSTER_DISTANCE),
-                    )
-                )
-            ),
-        )
-
-
-def _agglomerative_fallback(
-    vectors: list[list[float]],
-    n_clusters: int | None,
-    distance_threshold: float | None,
-) -> list[int]:
-    """Small deterministic cosine/average-linkage implementation for CI."""
-    cosine_distance = [
-        [
-            1.0 - sum(left * right for left, right in zip(vectors[i], vectors[j]))
-            for j in range(len(vectors))
-        ]
-        for i in range(len(vectors))
-    ]
-    clusters = [{index} for index in range(len(vectors))]
-
-    def average_distance(left: set[int], right: set[int]) -> float:
-        values = [cosine_distance[i][j] for i in left for j in right]
-        return sum(values) / len(values)
-
-    while len(clusters) > 1:
-        best = min(
-            (
-                (average_distance(clusters[i], clusters[j]), i, j)
-                for i in range(len(clusters))
-                for j in range(i + 1, len(clusters))
-            ),
-            key=lambda item: (item[0], item[1], item[2]),
-        )
-        if n_clusters is not None:
-            if len(clusters) <= n_clusters:
-                break
-        elif distance_threshold is not None and best[0] > distance_threshold:
-            break
-        _, left, right = best
-        clusters[left] |= clusters[right]
-        del clusters[right]
-
-    clusters.sort(key=min)
-    labels = [0] * len(vectors)
-    for label, cluster in enumerate(clusters):
-        for index in cluster:
-            labels[index] = label
-    return labels
+    model = AgglomerativeClustering(metric="cosine", linkage="average", **kwargs)
+    return [int(label) for label in model.fit_predict(representatives)]
 
 
 def _merge_intervals(intervals: list[tuple[float, float]]) -> list[tuple[float, float]]:
