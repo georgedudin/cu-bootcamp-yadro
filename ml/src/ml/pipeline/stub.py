@@ -127,6 +127,61 @@ def _whisper_model(model_name: str, device: str, compute_type: str):
     return WhisperModel(model_name, device=device, compute_type=compute_type)
 
 
+def _patch_huggingface_hub_for_pyannote() -> None:
+    """Bridge pyannote.audio 3.x to huggingface_hub 1.x.
+
+    pyannote 3.x calls ``hf_hub_download(use_auth_token=...)`` while
+    huggingface_hub 1.x renamed that argument to ``token``. Patching before
+    importing pyannote also fixes the function reference copied into
+    ``pyannote.audio.core.pipeline``.
+    """
+    import inspect
+    from functools import wraps
+
+    import huggingface_hub
+
+    original = huggingface_hub.hf_hub_download
+    if (
+        "use_auth_token" in inspect.signature(original).parameters
+        or getattr(original, "_pyannote_auth_compat", False)
+    ):
+        return
+
+    @wraps(original)
+    def compatible_hf_hub_download(*args, use_auth_token=None, **kwargs):
+        if use_auth_token is not None:
+            kwargs.setdefault("token", use_auth_token)
+        return original(*args, **kwargs)
+
+    compatible_hf_hub_download._pyannote_auth_compat = True
+    huggingface_hub.hf_hub_download = compatible_hf_hub_download
+
+
+def _patch_speechbrain_lazy_modules_on_windows() -> None:
+    """Prevent stack inspection from importing optional SpeechBrain modules.
+
+    SpeechBrain 1.1 recognizes POSIX ``/inspect.py`` paths but misses Windows
+    ``\\inspect.py`` paths. Newer Lightning inspects the stack while restoring
+    checkpoints and would otherwise try to import optional packages like k2.
+    """
+    if os.name != "nt":
+        return
+
+    from speechbrain.utils.importutils import LazyModule
+
+    original = LazyModule.__getattr__
+    if getattr(original, "_windows_inspect_compat", False):
+        return
+
+    def compatible_getattr(self, attr):
+        if attr == "__file__":
+            raise AttributeError(attr)
+        return original(self, attr)
+
+    compatible_getattr._windows_inspect_compat = True
+    LazyModule.__getattr__ = compatible_getattr
+
+
 @lru_cache(maxsize=2)
 def _diarization_pipeline(model_name: str, device: str):
     # torchaudio 2.9 removed its legacy metadata/backend names while
@@ -145,16 +200,25 @@ def _diarization_pipeline(model_name: str, device: str):
     if not hasattr(torchaudio, "list_audio_backends"):
         torchaudio.list_audio_backends = lambda: ["soundfile"]  # type: ignore[attr-defined]
 
+    # Official pyannote 3.x checkpoints contain this harmless version value.
+    # PyTorch 2.6+ defaults torch.load to weights_only=True, so it must be
+    # explicitly allowlisted before Lightning loads the trusted checkpoint.
+    from torch.torch_version import TorchVersion
+
+    _patch_huggingface_hub_for_pyannote()
     from pyannote.audio import Pipeline
+    from pyannote.audio.core.task import Problem, Resolution, Specifications
+
+    torch.serialization.add_safe_globals(
+        [TorchVersion, Specifications, Problem, Resolution]
+    )
+    _patch_speechbrain_lazy_modules_on_windows()
 
     token = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_TOKEN")
-    kwargs = {"token": token} if token else {}
-    try:
-        pipeline = Pipeline.from_pretrained(model_name, **kwargs)
-    except TypeError:
-        # pyannote.audio 3.1 / huggingface_hub used the old keyword.
-        kwargs = {"use_auth_token": token} if token else {}
-        pipeline = Pipeline.from_pretrained(model_name, **kwargs)
+    pipeline = Pipeline.from_pretrained(
+        model_name,
+        **({"use_auth_token": token} if token else {}),
+    )
     if pipeline is None:
         raise RuntimeError(
             f"Could not load gated pyannote model {model_name!r}; "
