@@ -12,7 +12,9 @@ HTTP_PORT=$(grep -E '^YADRO_HTTP_PORT=' infra/.env 2>/dev/null | cut -d= -f2 || 
 HTTP_PORT="${HTTP_PORT:-8080}"
 
 echo "» building images"
-$COMPOSE build
+# --profile warmup: profiled services are SKIPPED by a plain `compose build`,
+# which would leave the warmup gate running a stale image forever.
+$COMPOSE --profile warmup build
 
 # Model gate BEFORE the old, working workers are replaced: a warm /hf cache
 # passes offline in ~a minute (no token use); a cold cache fails the offline
