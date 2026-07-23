@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { audioUrl, getTimeline } from "../api";
+import { useI18n } from "../i18n";
 import { paletteFor } from "../palette";
 import type { Timeline, TimelineSegment } from "../types";
 import Track from "./Track";
@@ -30,6 +31,7 @@ export default function TimelinePanel({
   id: string;
   filename: string;
 }) {
+  const { t, speaker } = useI18n();
   const [timeline, setTimeline] = useState<Timeline>();
   const [error, setError] = useState<string>();
   const [currentIndex, setCurrentIndex] = useState(-1);
@@ -57,13 +59,13 @@ export default function TimelinePanel({
 
   if (error) {
     return (
-      <p className="text-sm text-red-400">
-        Couldn't load the timeline: {error}
-      </p>
+      <p className="text-sm text-red-400">{t("timelineError", { error })}</p>
     );
   }
   if (!timeline) {
-    return <p className="text-sm text-neutral-500">Loading timeline…</p>;
+    return (
+      <p className="text-sm text-neutral-500">{t("loadingTimeline")}</p>
+    );
   }
 
   const onTimeUpdate = () => {
@@ -104,12 +106,12 @@ export default function TimelinePanel({
               className="inline-block h-2.5 w-2.5 rounded-full"
               style={{ backgroundColor: palette.get(s.id) }}
             />
-            {s.id}
+            {speaker(s.id)}
           </span>
         ))}
         <span className="inline-flex items-center gap-1.5 text-neutral-500">
           <span className="inline-block h-2.5 w-2.5 rounded-full bg-neutral-800" />
-          silence
+          {t("silence")}
         </span>
       </div>
       <Transcript
