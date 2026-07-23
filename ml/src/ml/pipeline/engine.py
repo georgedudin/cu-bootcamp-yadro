@@ -233,16 +233,29 @@ def get_encoder(device: str | None = None):
 
 
 def preload_chunk_models() -> None:
-    """Load ASR + diarization + embedding models once (worker boot / warmup).
+    """Load ASR + diarization + embedding models AND push ~1 s of silence
+    through each (worker boot / deploy warmup).
 
-    A broken model setup (missing weights, bad CUDA stack, no VRAM) must fail
-    HERE, loudly, instead of surfacing as per-job retry churn."""
+    Loading alone is NOT enough: CTranslate2 dlopens cuBLAS at the first
+    encode, not in the constructor — a machine that can load models but not
+    infer (wrong CUDA sonames, exhausted VRAM) must fail HERE, loudly,
+    instead of surfacing as per-job retry churn."""
+    import numpy as np
+    import torch
+
     device = _device()
     log.info("preloading chunk models on device=%s", device)
-    get_whisper(device)
-    get_diarizer(device)
-    get_encoder(device)
-    log.info("chunk models ready")
+    silence = np.zeros(16000, dtype=np.float32)  # 1 s @ the canonical 16 kHz
+    segments, _ = get_whisper(device).transcribe(silence, beam_size=1)
+    list(segments)  # consume the generator: forces the encoder GEMM
+    get_diarizer(device)(
+        {"waveform": torch.from_numpy(silence).unsqueeze(0), "sample_rate": 16000}
+    )
+    with torch.inference_mode():
+        get_encoder(device).encode_batch(
+            torch.from_numpy(silence).unsqueeze(0).to(device)
+        )
+    log.info("chunk models ready (smoke inference passed)")
 
 
 def _iter_diarization(annotation):
