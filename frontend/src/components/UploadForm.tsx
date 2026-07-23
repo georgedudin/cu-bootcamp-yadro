@@ -5,6 +5,7 @@ import { useI18n } from "../i18n";
 export default function UploadForm() {
   const { t } = useI18n();
   const fileRef = useRef<HTMLInputElement>(null);
+  const [fileName, setFileName] = useState("");
   const [speakers, setSpeakers] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
@@ -21,6 +22,7 @@ export default function UploadForm() {
       await uploadRecording(file, speakers === "" ? null : Number(speakers));
       setUploaded(file.name);
       if (fileRef.current) fileRef.current.value = "";
+      setFileName("");
       setSpeakers("");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -43,13 +45,26 @@ export default function UploadForm() {
             <span className="text-neutral-300">{t("fileLabel")}</span>
             <span className="text-xs text-neutral-600">· {t("fileHint")}</span>
           </span>
-          <input
-            ref={fileRef}
-            type="file"
-            accept="audio/mpeg,.mp3"
-            required
-            className="mt-auto h-9 w-full overflow-hidden rounded-md border border-neutral-700 bg-neutral-950 pr-3 text-sm text-neutral-500 file:mr-4 file:h-full file:cursor-pointer file:border-0 file:bg-neutral-800 file:px-4 file:text-sm file:text-neutral-200 hover:file:bg-neutral-700"
-          />
+          {/* The native input's "Choose File / no file chosen" text is drawn
+              by the browser and isn't localizable, so the real input is made
+              transparent and laid over our own labels. It stays in layout and
+              focusable, so `required` validation still works. */}
+          <span className="group relative mt-auto flex h-9 w-full items-center overflow-hidden rounded-md border border-neutral-700 bg-neutral-950">
+            <span className="flex h-full shrink-0 items-center bg-neutral-800 px-4 text-sm text-neutral-200 transition-colors group-hover:bg-neutral-700">
+              {t("chooseFile")}
+            </span>
+            <span className="min-w-0 truncate px-3 text-sm text-neutral-500">
+              {fileName || t("noFileSelected")}
+            </span>
+            <input
+              ref={fileRef}
+              type="file"
+              accept="audio/mpeg,.mp3"
+              required
+              onChange={(e) => setFileName(e.target.files?.[0]?.name ?? "")}
+              className="absolute inset-0 cursor-pointer opacity-0"
+            />
+          </span>
         </label>
         <label className="flex min-w-0 flex-1 flex-col gap-1.5 text-sm">
           <span className="flex flex-col leading-tight">
