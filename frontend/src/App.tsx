@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { listRecordings } from "./api";
+import { cleanupRecordings, listRecordings } from "./api";
 import LangSwitch from "./components/LangSwitch";
 import RecordingsList from "./components/RecordingsList";
 import TimelinePanel from "./components/TimelinePanel";
@@ -15,6 +15,22 @@ export default function App() {
     id: string;
     filename: string;
   } | null>(null);
+  const [cleaning, setCleaning] = useState(false);
+
+  // Dev tool: full wipe, even mid-processing. The 2.5s poll shows the
+  // emptied list on its next tick.
+  const onCleanup = async () => {
+    if (!window.confirm(t("cleanupConfirm"))) return;
+    setCleaning(true);
+    try {
+      await cleanupRecordings();
+      setSelected(null);
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : String(e));
+    } finally {
+      setCleaning(false);
+    }
+  };
 
   // Empty state = centered upload hero. Once there's something to show, the
   // hero rises to the top (padding transition) and the table drops in below.
@@ -23,7 +39,14 @@ export default function App() {
   return (
     <div className="min-h-screen">
       <div className="mx-auto max-w-4xl px-6 pb-20">
-        <div className="flex items-center justify-end py-4">
+        <div className="flex items-center justify-end gap-3 py-4">
+          <button
+            onClick={onCleanup}
+            disabled={cleaning}
+            className="rounded border border-red-500/40 px-3 py-1 text-sm text-red-400 transition-colors hover:bg-red-500/10 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {t("cleanup")}
+          </button>
           <LangSwitch />
         </div>
 

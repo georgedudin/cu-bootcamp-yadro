@@ -31,3 +31,17 @@ def save_mp3(recording_id: UUID, stream: BinaryIO) -> Path:
     with target.open("wb") as out:
         shutil.copyfileobj(stream, out, length=1024 * 1024)
     return target
+
+
+def delete_all_blobs() -> int:
+    """Dev cleanup: remove every per-recording directory. Returns the count.
+    Also catches orphan dirs whose DB rows are already gone."""
+    base = Path(get_settings().blob_dir)
+    if not base.exists():
+        return 0
+    removed = 0
+    for child in base.iterdir():
+        if child.is_dir():
+            shutil.rmtree(child, ignore_errors=True)
+            removed += 1
+    return removed

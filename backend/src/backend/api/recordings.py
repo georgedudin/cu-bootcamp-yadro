@@ -11,8 +11,10 @@ from fastapi.responses import FileResponse
 from sqlalchemy import select
 
 from backend.orchestration.ingest import ingest
-from backend.storage.blob import save_mp3
+from backend.orchestration.queue import purge_jobs
+from backend.storage.blob import delete_all_blobs, save_mp3
 from contracts import (
+    CleanupResponse,
     Progress,
     RecordingCreateResponse,
     RecordingDetail,
@@ -86,6 +88,22 @@ def list_recordings() -> list[RecordingSummary]:
     with session_scope() as session:
         recs = session.scalars(select(Recording).order_by(Recording.uploaded_at.desc())).all()
         return [RecordingSummary(**_summary_kwargs(r)) for r in recs]
+
+
+@router.delete("/recordings")
+def cleanup_recordings() -> CleanupResponse:
+    """DEV TOOL: wipe everything — jobs, DB rows, audio files — even
+    recordings still mid-processing. Order matters: stop new work first,
+    then rows (children cascade at the DB level), then files, so the API
+    never lists a recording whose blob is already gone. A chunk job already
+    executing inside a worker can't be aborted; the glue's missing-row
+    guards make its completion a harmless no-op."""
+    purge_jobs()
+    with session_scope() as session:
+        deleted = session.query(Recording).delete()
+    removed_dirs = delete_all_blobs()
+    log.warning("dev cleanup: %d recordings, %d blob dirs", deleted, removed_dirs)
+    return CleanupResponse(deleted_recordings=deleted)
 
 
 @router.get("/recordings/{recording_id}")

@@ -100,6 +100,21 @@
       "title": "ChunkWindow",
       "type": "object"
     },
+    "CleanupResponse": {
+      "additionalProperties": false,
+      "description": "Result of the dev-only DELETE /api/recordings wipe.",
+      "properties": {
+        "deleted_recordings": {
+          "title": "Deleted Recordings",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "deleted_recordings"
+      ],
+      "title": "CleanupResponse",
+      "type": "object"
+    },
     "Progress": {
       "additionalProperties": false,
       "properties": {

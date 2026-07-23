@@ -83,7 +83,8 @@ def transcribe_chunk(payload: dict) -> None:
             # crash window also swallowed the stitch enqueue, recover it here.
             with session_scope() as session:
                 rec = session.get(Recording, job.recording_id)
-                stuck = rec.status == RecordingStatus.stitching.value
+                # rec is None when the recording was wiped (dev cleanup) mid-job
+                stuck = rec is not None and rec.status == RecordingStatus.stitching.value
             if stuck:
                 _enqueue_stitch(job.recording_id)
     except Exception:

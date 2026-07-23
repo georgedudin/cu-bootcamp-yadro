@@ -18,6 +18,7 @@ from contracts.jobs import (
     Word,
 )
 from contracts.rest import (
+    CleanupResponse,
     Progress,
     RecordingCreateResponse,
     RecordingDetail,
@@ -34,6 +35,7 @@ __all__ = [
     "EMBEDDING_DIM",
     "RecordingStatus",
     "SpeakerRole",
+    "CleanupResponse",
     "Progress",
     "RecordingCreateResponse",
     "RecordingSummary",

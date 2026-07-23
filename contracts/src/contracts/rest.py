@@ -55,6 +55,12 @@ class TimelineSegment(WireModel):
     text: str
 
 
+class CleanupResponse(WireModel):
+    """Result of the dev-only DELETE /api/recordings wipe."""
+
+    deleted_recordings: int
+
+
 class Timeline(WireModel):
     """Render payload for the colored player. Gaps between segments are
     silence — the backend emits NO explicit silence rows; the FE paints gaps

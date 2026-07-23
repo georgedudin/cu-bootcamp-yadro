@@ -46,3 +46,13 @@ def enqueue_stitch(job: StitchRecordingJob) -> None:
         retry=Retry(max=2, interval=[10, 30]),
         job_timeout=1800,
     )
+
+
+def purge_jobs() -> None:
+    """Dev cleanup: drop ALL RQ state at once. This Redis db holds nothing but
+    RQ (queues, job hashes, scheduled-retry/started/failed registries), so
+    flushdb is the deterministic wipe — enumerating every RQ registry across
+    both queues leaves job hashes behind and is easy to get subtly wrong.
+    In-flight jobs can't be aborted under SimpleWorker (no horse process);
+    the glue's missing-row guards turn their completion into a no-op."""
+    _redis().flushdb()

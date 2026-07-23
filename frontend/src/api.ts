@@ -1,4 +1,5 @@
 import type {
+  CleanupResponse,
   RecordingCreateResponse,
   RecordingSummary,
   Timeline,
@@ -21,6 +22,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const listRecordings = () =>
   request<RecordingSummary[]>("/api/recordings");
+
+// Dev tool: wipes ALL recordings, files and transcripts, even mid-processing.
+export const cleanupRecordings = () =>
+  request<CleanupResponse>("/api/recordings", { method: "DELETE" });
 
 export const getTimeline = (id: string) =>
   request<Timeline>(`/api/recordings/${id}/timeline`);
