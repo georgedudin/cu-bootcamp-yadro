@@ -14,6 +14,7 @@ import contracts as c
 # 'serialization' for shapes the server EMITS (responses), 'validation' for
 # shapes a peer must PRODUCE and we validate (jobs, results, seam types).
 MODELS = [
+    (c.CleanupResponse, "serialization"),
     (c.Progress, "serialization"),
     (c.RecordingCreateResponse, "serialization"),
     (c.RecordingSummary, "serialization"),

@@ -30,6 +30,7 @@ export type Turns = Turn[];
 export type ChunkIndex1 = number;
 export type EndS = number;
 export type StartS = number;
+export type DeletedRecordings = number;
 export type DoneChunks = number;
 export type TotalChunks = number;
 export type Id = string;
@@ -152,6 +153,15 @@ export interface ChunkWindow {
   chunk_index: ChunkIndex1;
   end_s: EndS;
   start_s: StartS;
+}
+/**
+ * Result of the dev-only DELETE /api/recordings wipe.
+ *
+ * This interface was referenced by `CuBootcampYadroWireContracts`'s JSON-Schema
+ * via the `definition` "CleanupResponse".
+ */
+export interface CleanupResponse {
+  deleted_recordings: DeletedRecordings;
 }
 /**
  * This interface was referenced by `CuBootcampYadroWireContracts`'s JSON-Schema
