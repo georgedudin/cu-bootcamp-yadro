@@ -68,6 +68,10 @@ services:
     environment:
       <<: *app_env
       HF_HOME: /hf
+      # pyannote IGNORES HF_HOME — it caches via PYANNOTE_CACHE (default
+      # ~/.cache/torch/pyannote, i.e. lost with the container). Must point
+      # into the volume or offline workers can't find the warmed weights.
+      PYANNOTE_CACHE: /hf/pyannote
       ECAPA_CACHE_DIR: /hf/ecapa
       HF_HUB_OFFLINE: ${HF_HUB_OFFLINE:-0}
       TRANSFORMERS_OFFLINE: ${TRANSFORMERS_OFFLINE:-0}
@@ -95,6 +99,7 @@ services:
     command: ["python", "-m", "ml.warmup"]
     environment:
       HF_HOME: /hf
+      PYANNOTE_CACHE: /hf/pyannote  # see ml-chunk-worker note
       ECAPA_CACHE_DIR: /hf/ecapa
       HF_TOKEN: ${HF_TOKEN:-}
       ML_DEVICE: ${ML_DEVICE:-auto}
