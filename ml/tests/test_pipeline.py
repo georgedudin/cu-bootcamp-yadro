@@ -73,7 +73,36 @@ def test_seam_copies_are_deduped():
 
     out = stitch(results, windows, expected_speakers=None, duration_s=85)
 
-    assert [s.text for s in out.segments] == ["body", "seam sentence", "tail"]
+    # The duplicate seam copy is dropped (dedupe), and the three same-speaker
+    # pieces then glue into one logical block. If dedupe had failed we'd see
+    # "seam sentence" twice inside the block.
+    assert [s.text for s in out.segments] == ["body seam sentence tail"]
+
+
+def test_same_speaker_segments_merge_across_pauses():
+    # Whisper hands us many tiny segments per turn. Consecutive same-speaker
+    # pieces glue into one block even across a pause (5->9 s), while a different
+    # speaker breaks the run — so we get teacher / student_1 / teacher, not five
+    # fragments.
+    results = [
+        ChunkResult(recording_id=REC, chunk_index=0,
+            segments=[_seg(0, 5, "SPEAKER_00", "First sentence."),
+                      _seg(9, 14, "SPEAKER_00", "Second after a pause."),
+                      _seg(15, 18, "SPEAKER_01", "A question?"),
+                      _seg(20, 25, "SPEAKER_00", "Back to the teacher.")],
+            turns=[_turn(0, 14, "SPEAKER_00", true_speaker=0),
+                   _turn(15, 18, "SPEAKER_01", true_speaker=1),
+                   _turn(20, 25, "SPEAKER_00", true_speaker=0)]),
+    ]
+    windows = [ChunkWindow(chunk_index=0, start_s=0, end_s=45)]
+
+    out = stitch(results, windows, expected_speakers=None, duration_s=45)
+
+    assert [(s.speaker_id, s.text) for s in out.segments] == [
+        ("teacher", "First sentence. Second after a pause."),
+        ("student_1", "A question?"),
+        ("teacher", "Back to the teacher."),
+    ]
 
 
 def test_expected_speakers_above_observations_clamps_instead_of_failing():
