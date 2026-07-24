@@ -507,6 +507,67 @@ def _dedupe_segments(items):
     return sorted(kept, key=lambda item: (item["start"], item["end"]))
 
 
+def _cluster_for_time(
+    t: float, chunk_turns: list[tuple[float, float, int]], fallback: int
+) -> int:
+    """Cluster of the diarization turn covering ``t`` (nearest turn if in a gap)."""
+    for start, end, cluster in chunk_turns:
+        if start <= t <= end:
+            return cluster
+    if chunk_turns:
+        return min(
+            chunk_turns, key=lambda turn: min(abs(t - turn[0]), abs(t - turn[1]))
+        )[2]
+    return fallback
+
+
+def _split_segment_by_speaker(
+    segment: ChunkSegment,
+    chunk_turns: list[tuple[float, float, int]],
+    fallback: int,
+) -> list[dict]:
+    """Cut one ASR segment at diarization speaker boundaries via word times.
+
+    A single Whisper segment can straddle a speaker change — its span overlaps
+    two turns — which would otherwise file two voices' words under one label and
+    let the later same-speaker merge glue them into a mixed block. Assigning
+    each WORD to the turn it falls in and splitting on change keeps every emitted
+    piece single-speaker. Segments without word timings fall back to the old
+    whole-segment assignment by maximum turn overlap.
+    """
+    words = [word for word in segment.words if word.end > word.start]
+    if not words:
+        candidates = [
+            (_overlap(segment.start, segment.end, start, end), cluster)
+            for start, end, cluster in chunk_turns
+        ]
+        positive = [candidate for candidate in candidates if candidate[0] > 0]
+        cluster = max(positive, key=lambda item: item[0])[1] if positive else fallback
+        return [
+            {
+                "start": segment.start,
+                "end": segment.end,
+                "text": segment.text,
+                "cluster": cluster,
+            }
+        ]
+
+    runs: list[dict] = []
+    for word in words:
+        cluster = _cluster_for_time((word.start + word.end) / 2.0, chunk_turns, fallback)
+        if runs and runs[-1]["cluster"] == cluster:
+            run = runs[-1]
+            run["end"] = word.end
+            run["text"] += word.word
+        else:
+            runs.append(
+                {"start": word.start, "end": word.end, "text": word.word, "cluster": cluster}
+            )
+    for run in runs:
+        run["text"] = run["text"].strip()
+    return runs
+
+
 def stitch(
     results: list[ChunkResult],
     windows: list[ChunkWindow],
@@ -623,28 +684,21 @@ def stitch(
         chunk_turns = mapped_turns[result.chunk_index]
         window = window_by_chunk.get(result.chunk_index)
         for segment in result.segments:
-            candidates = [
-                (_overlap(segment.start, segment.end, start, end), cluster)
-                for start, end, cluster in chunk_turns
-            ]
-            positive = [candidate for candidate in candidates if candidate[0] > 0]
-            if positive:
-                cluster = max(positive, key=lambda item: item[0])[1]
-            else:
-                cluster = local_to_cluster.get(
-                    (result.chunk_index, segment.local_speaker), teacher_cluster
-                )
-            raw_segments.append(
-                {
-                    "start": max(0.0, min(duration_s, segment.start)),
-                    "end": max(0.0, min(duration_s, segment.end)),
-                    "text": segment.text,
-                    "cluster": cluster,
-                    "chunk": result.chunk_index,
-                    "window_start": window.start_s if window else segment.start,
-                    "window_end": window.end_s if window else segment.end,
-                }
+            fallback = local_to_cluster.get(
+                (result.chunk_index, segment.local_speaker), teacher_cluster
             )
+            for piece in _split_segment_by_speaker(segment, chunk_turns, fallback):
+                raw_segments.append(
+                    {
+                        "start": max(0.0, min(duration_s, piece["start"])),
+                        "end": max(0.0, min(duration_s, piece["end"])),
+                        "text": piece["text"],
+                        "cluster": piece["cluster"],
+                        "chunk": result.chunk_index,
+                        "window_start": window.start_s if window else segment.start,
+                        "window_end": window.end_s if window else segment.end,
+                    }
+                )
 
     deduped = _dedupe_segments(
         item for item in raw_segments if item["end"] > item["start"]
