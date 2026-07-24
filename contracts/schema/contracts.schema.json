@@ -192,6 +192,19 @@
         "progress": {
           "$ref": "#/$defs/Progress"
         },
+        "rtf": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Real-time factor: processing wall-time / audio duration (lower is faster). Set once processing finishes; null while it's still running or if the duration is unknown.",
+          "title": "Rtf"
+        },
         "status": {
           "$ref": "#/$defs/RecordingStatus"
         },
@@ -250,6 +263,19 @@
         },
         "progress": {
           "$ref": "#/$defs/Progress"
+        },
+        "rtf": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Real-time factor: processing wall-time / audio duration (lower is faster). Set once processing finishes; null while it's still running or if the duration is unknown.",
+          "title": "Rtf"
         },
         "status": {
           "$ref": "#/$defs/RecordingStatus"

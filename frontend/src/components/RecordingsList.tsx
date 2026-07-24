@@ -17,6 +17,12 @@ function fmtDuration(s: number | null): string {
   return `${m}:${String(sec).padStart(2, "0")}`;
 }
 
+// Real-time factor: only set once processing finished (null while running).
+function fmtRtf(rtf: number | null | undefined): string {
+  if (rtf == null) return "—";
+  return `${rtf.toFixed(2)}×`;
+}
+
 export default function RecordingsList({
   recordings,
   error,
@@ -38,6 +44,9 @@ export default function RecordingsList({
             <th className="px-4 py-2.5">{t("colFile")}</th>
             <th className="px-4 py-2.5">{t("colUploaded")}</th>
             <th className="px-4 py-2.5">{t("colDuration")}</th>
+            <th className="px-4 py-2.5" title={t("colRtfHint")}>
+              {t("colRtf")}
+            </th>
             <th className="px-4 py-2.5">{t("colStatus")}</th>
           </tr>
         </thead>
@@ -65,6 +74,9 @@ export default function RecordingsList({
                 </td>
                 <td className="whitespace-nowrap px-4 py-2.5 tabular-nums text-neutral-400">
                   {fmtDuration(r.duration_s)}
+                </td>
+                <td className="whitespace-nowrap px-4 py-2.5 tabular-nums text-neutral-400">
+                  {fmtRtf(r.rtf)}
                 </td>
                 <td className="px-4 py-2.5">
                   <span

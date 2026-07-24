@@ -32,6 +32,12 @@ class RecordingSummary(WireModel):
     duration_s: float | None
     status: RecordingStatus
     progress: Progress
+    rtf: float | None = Field(
+        default=None,
+        description="Real-time factor: processing wall-time / audio duration "
+        "(lower is faster). Set once processing finishes; null while it's still "
+        "running or if the duration is unknown.",
+    )
 
 
 class RecordingDetail(RecordingSummary):

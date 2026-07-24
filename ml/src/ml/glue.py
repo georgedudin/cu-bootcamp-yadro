@@ -14,7 +14,7 @@ from uuid import UUID
 
 from redis import Redis
 from rq import Queue, Retry, get_current_job
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 
 from contracts import (
     ChunkResult,
@@ -61,7 +61,12 @@ def transcribe_chunk(payload: dict) -> None:
                     Recording.id == job.recording_id,
                     Recording.status == RecordingStatus.queued.value,
                 )
-                .values(status=RecordingStatus.processing.value)
+                # WHERE status==queued fires exactly once — the first chunk to
+                # start — so this stamps the true processing start for RTF.
+                .values(
+                    status=RecordingStatus.processing.value,
+                    processing_started_at=func.now(),
+                )
             )
 
         result = pipeline.transcribe_chunk(job)
@@ -159,6 +164,7 @@ def stitch_recording(payload: dict) -> None:
                 for s in stitched.segments
             )
             rec.status = RecordingStatus.done.value
+            rec.processing_completed_at = func.now()
         log.info(
             "stitched %s: %d speakers, %d segments",
             job.recording_id, len(stitched.speakers), len(stitched.segments),

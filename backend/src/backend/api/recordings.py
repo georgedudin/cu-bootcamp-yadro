@@ -31,6 +31,20 @@ log = logging.getLogger(__name__)
 router = APIRouter(tags=["recordings"])
 
 
+def _rtf(rec: Recording) -> float | None:
+    """Processing wall-time / audio duration, once both are known."""
+    if (
+        rec.processing_started_at is None
+        or rec.processing_completed_at is None
+        or not rec.duration_s
+    ):
+        return None
+    processing_s = (
+        rec.processing_completed_at - rec.processing_started_at
+    ).total_seconds()
+    return processing_s / rec.duration_s if processing_s > 0 else None
+
+
 def _summary_kwargs(rec: Recording) -> dict:
     return {
         "id": rec.id,
@@ -42,6 +56,7 @@ def _summary_kwargs(rec: Recording) -> dict:
             done_chunks=rec.chunks_total - rec.chunks_remaining,
             total_chunks=rec.chunks_total,
         ),
+        "rtf": _rtf(rec),
     }
 
 
