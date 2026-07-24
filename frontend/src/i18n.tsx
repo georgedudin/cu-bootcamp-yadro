@@ -42,6 +42,9 @@ const en: Dict = {
   speakerTeacher: "Teacher",
   speakerStudent: "Student #{n}",
   nowPlaying: "Now playing ↓",
+  download: "Download",
+  mdTranscript: "Transcript",
+  mdSpeakers: "Speakers",
   cleanup: "Delete all",
   cleanupConfirm:
     "Delete ALL recordings, audio files and transcripts (even those still processing)? This cannot be undone.",
@@ -81,6 +84,9 @@ const ru: Dict = {
   speakerTeacher: "Преподаватель",
   speakerStudent: "Студент №{n}",
   nowPlaying: "Сейчас играет ↓",
+  download: "Скачать",
+  mdTranscript: "Транскрипт",
+  mdSpeakers: "Говорящих",
   cleanup: "Удалить всё",
   cleanupConfirm:
     "Удалить ВСЕ записи, аудиофайлы и расшифровки (включая ещё обрабатываемые)? Это действие необратимо.",

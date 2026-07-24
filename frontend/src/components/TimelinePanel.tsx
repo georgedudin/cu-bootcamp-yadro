@@ -24,6 +24,12 @@ function indexForTime(segs: TimelineSegment[], t: number): number {
   return ans;
 }
 
+function fmtTimestamp(s: number): string {
+  const m = Math.floor(s / 60);
+  const sec = Math.floor(s % 60);
+  return `${m}:${String(sec).padStart(2, "0")}`;
+}
+
 export default function TimelinePanel({
   id,
   filename,
@@ -82,9 +88,60 @@ export default function TimelinePanel({
     if (audio) audio.currentTime = t;
   };
 
+  // Build a self-contained Markdown transcript and trigger a client-side
+  // download — no backend round-trip; the timeline payload is already loaded.
+  const downloadTranscript = () => {
+    const lines = [
+      `# ${filename}`,
+      "",
+      `> ${t("mdTranscript")} · ${t("colDuration")}: ` +
+        `${fmtTimestamp(timeline.duration_s)} · ` +
+        `${t("mdSpeakers")}: ${timeline.speakers.length}`,
+      "",
+    ];
+    for (const seg of timeline.segments) {
+      lines.push(
+        `**[${fmtTimestamp(seg.start)}] ${speaker(seg.speaker_id)}:** ${seg.text}`,
+      );
+      lines.push("");
+    }
+    const blob = new Blob([lines.join("\n")], {
+      type: "text/markdown;charset=utf-8",
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${filename.replace(/\.[^./\\]+$/, "")}.md`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <div className="flex flex-col gap-4">
-      <h2 className="text-lg font-semibold text-neutral-100">{filename}</h2>
+      <div className="flex items-center justify-between gap-3">
+        <h2 className="min-w-0 truncate text-lg font-semibold text-neutral-100">
+          {filename}
+        </h2>
+        <button
+          type="button"
+          onClick={downloadTranscript}
+          title={t("download")}
+          className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-neutral-700 bg-neutral-900 px-3 py-1.5 text-xs font-medium text-neutral-200 transition-colors hover:bg-neutral-800"
+        >
+          <svg
+            viewBox="0 0 20 20"
+            fill="currentColor"
+            className="h-3.5 w-3.5"
+            aria-hidden="true"
+          >
+            <path d="M10 2a.75.75 0 0 1 .75.75v7.19l2.22-2.22a.75.75 0 1 1 1.06 1.06l-3.5 3.5a.75.75 0 0 1-1.06 0l-3.5-3.5a.75.75 0 1 1 1.06-1.06l2.22 2.22V2.75A.75.75 0 0 1 10 2Z" />
+            <path d="M3.5 12.75a.75.75 0 0 1 .75.75v1.5c0 .138.112.25.25.25h11a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 15.5 16.5h-11A1.75 1.75 0 0 1 2.75 14.75v-1.5a.75.75 0 0 1 .75-.75Z" />
+          </svg>
+          {t("download")}
+        </button>
+      </div>
       <audio
         ref={audioRef}
         controls
