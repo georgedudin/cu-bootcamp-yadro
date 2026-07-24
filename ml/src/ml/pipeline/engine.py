@@ -388,30 +388,53 @@ def transcribe_chunk(job: TranscribeChunkJob) -> ChunkResult:
 def _cluster_representatives(
     representatives: list[list[float]], expected_speakers: int | None
 ) -> list[int]:
-    if expected_speakers is not None:
-        if expected_speakers < 1:
-            raise ValueError("expected_speakers must be positive")
-        if expected_speakers > len(representatives):
-            # Upload hint exceeds what the audio produced (short recording,
-            # silent students, ...). Failing the whole recording over a hint
-            # would be worse than a smaller speaker set — clamp and log.
-            log.warning(
-                "expected %d speakers but only %d chunk-local observations — clamping",
-                expected_speakers, len(representatives),
-            )
-        kwargs = {"n_clusters": min(expected_speakers, len(representatives))}
-    else:
-        threshold = float(
-            os.getenv("SPEAKER_CLUSTER_DISTANCE", str(_DEFAULT_CLUSTER_DISTANCE))
-        )
-        kwargs = {"n_clusters": None, "distance_threshold": threshold}
+    """Group (chunk, local-speaker) centroids into global speakers.
+
+    ``expected_speakers`` is a CEILING, not an exact count. We cluster by
+    natural voice distance first and only collapse down to the hint when MORE
+    voices genuinely emerge — forcing exactly N shatters a dominant speaker
+    (the teacher, present in nearly every chunk) into a fresh ID per chunk when
+    the other students stay silent, which is the classic cross-chunk mismatch.
+
+    ``SPEAKER_CLUSTER_DISTANCE`` is the one knob to tune on real audio: lower
+    splits more (risks fragmenting one voice across chunks), higher merges more
+    (risks fusing two students into one). The 0.72 default is a reasonable
+    ECAPA cosine starting point — validate it against a labelled recording.
+    """
+    if expected_speakers is not None and expected_speakers < 1:
+        raise ValueError("expected_speakers must be positive")
     if len(representatives) == 1:
         return [0]
 
     from sklearn.cluster import AgglomerativeClustering
 
-    model = AgglomerativeClustering(metric="cosine", linkage="average", **kwargs)
-    return [int(label) for label in model.fit_predict(representatives)]
+    threshold = float(
+        os.getenv("SPEAKER_CLUSTER_DISTANCE", str(_DEFAULT_CLUSTER_DISTANCE))
+    )
+    natural = [
+        int(label)
+        for label in AgglomerativeClustering(
+            n_clusters=None,
+            distance_threshold=threshold,
+            metric="cosine",
+            linkage="average",
+        ).fit_predict(representatives)
+    ]
+    if expected_speakers is None or len(set(natural)) <= expected_speakers:
+        return natural
+
+    # More natural voices than the hint allows — collapse to exactly the ceiling.
+    ceiling = min(expected_speakers, len(representatives))
+    log.info(
+        "natural clustering found %d voices > hint %d — capping to %d",
+        len(set(natural)), expected_speakers, ceiling,
+    )
+    return [
+        int(label)
+        for label in AgglomerativeClustering(
+            n_clusters=ceiling, metric="cosine", linkage="average"
+        ).fit_predict(representatives)
+    ]
 
 
 def _merge_intervals(intervals: list[tuple[float, float]]) -> list[tuple[float, float]]:
@@ -491,18 +514,28 @@ def stitch(
 
     # One robust observation per (chunk, local speaker). Local labels can be
     # arbitrarily permuted in every chunk, so only embeddings cross the seam.
-    grouped_embeddings: dict[tuple[int, str], list[list[float]]] = defaultdict(list)
+    # Turns are weighted by duration: a 0.5 s interjection gets padded into a
+    # noisy ECAPA vector, so letting it sway the centroid as much as a 30 s
+    # monologue is exactly what smears one real voice across chunks.
+    grouped_turns: dict[tuple[int, str], list[tuple[list[float], float]]] = defaultdict(
+        list
+    )
     for result in results:
         for turn in result.turns:
-            grouped_embeddings[(result.chunk_index, turn.local_speaker)].append(
-                turn.embedding
+            weight = max(turn.end - turn.start, _MIN_EMBEDDING_AUDIO_S)
+            grouped_turns[(result.chunk_index, turn.local_speaker)].append(
+                (turn.embedding, weight)
             )
 
-    keys = sorted(grouped_embeddings)
+    keys = sorted(grouped_turns)
     representatives = []
     for key in keys:
-        vectors = grouped_embeddings[key]
-        mean = [sum(values) / len(vectors) for values in zip(*vectors)]
+        pairs = grouped_turns[key]
+        total_weight = sum(weight for _, weight in pairs)
+        mean = [
+            sum(vector[dim] * weight for vector, weight in pairs) / total_weight
+            for dim in range(len(pairs[0][0]))
+        ]
         representatives.append(_normalise(mean))
 
     if not representatives:
@@ -542,9 +575,31 @@ def stitch(
         totals.setdefault(cluster, 0.0)
         cluster_first_seen.setdefault(cluster, math.inf)
 
-    teacher_cluster = min(
+    # Teacher = the conversational hub, identified by how often a switch to a
+    # DIFFERENT speaker follows their turn — NOT by total speech time. A lecture
+    # runs teacher -> student -> teacher -> student..., so the teacher is
+    # followed by a switch far more often than any single (rarely-speaking)
+    # student, even when one student happens to give a long answer. Walking the
+    # turns in time order, we credit each speaker every time a different speaker
+    # starts right after them; overlapping seam-duplicate turns share a cluster
+    # and so never register as a switch.
+    ordered_turns = sorted(
+        turn for chunk_turns in mapped_turns.values() for turn in chunk_turns
+    )
+    switch_counts: dict[int, int] = defaultdict(int)
+    previous_cluster: int | None = None
+    for _, _, cluster in ordered_turns:
+        if previous_cluster is not None and cluster != previous_cluster:
+            switch_counts[previous_cluster] += 1
+        previous_cluster = cluster
+
+    teacher_cluster = max(
         all_clusters,
-        key=lambda cluster: (-totals[cluster], cluster_first_seen[cluster], cluster),
+        key=lambda cluster: (
+            switch_counts.get(cluster, 0),  # primary: most often followed by a switch
+            totals[cluster],  # tie-break: longest total speech
+            -cluster,  # final deterministic tie-break
+        ),
     )
     student_clusters = sorted(
         (cluster for cluster in all_clusters if cluster != teacher_cluster),
