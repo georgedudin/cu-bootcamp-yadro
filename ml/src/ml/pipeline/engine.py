@@ -641,6 +641,26 @@ def stitch(
     deduped = _dedupe_segments(
         item for item in raw_segments if item["end"] > item["start"]
     )
+
+    # Whisper shreds one spoken turn into a segment every sentence or two. Glue
+    # consecutive same-speaker pieces into a single logical block — only a change
+    # of speaker starts a new block, a pause alone does not — so a teacher's
+    # paragraph reads as one block instead of a dozen fragments. The block spans
+    # first-piece start to last-piece end (internal pauses fall inside it);
+    # per-speaker total_s is computed from turns, not blocks, and stays exact.
+    blocks: list[dict] = []
+    for item in deduped:
+        if blocks and blocks[-1]["cluster"] == item["cluster"]:
+            block = blocks[-1]
+            block["end"] = max(block["end"], item["end"])
+            piece = item["text"].strip()
+            if piece:
+                block["text"] = (
+                    f"{block['text']} {piece}".strip() if block["text"] else piece
+                )
+        else:
+            blocks.append(dict(item))
+
     timeline = [
         TimelineSegment(
             start=item["start"],
@@ -648,7 +668,7 @@ def stitch(
             speaker_id=cluster_to_id[item["cluster"]],
             text=item["text"],
         )
-        for item in deduped
+        for item in blocks
     ]
 
     ordered_clusters = [teacher_cluster, *student_clusters]
