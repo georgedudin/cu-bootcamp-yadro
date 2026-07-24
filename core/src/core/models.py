@@ -48,6 +48,12 @@ class Recording(Base):
     )
     duration_s: Mapped[float | None] = mapped_column(Float)
     status: Mapped[str] = mapped_column(String(16), default=RecordingStatus.uploaded.value)
+    # RTF timing: started = the first chunk flips queued->processing; completed =
+    # stitch marks the recording done. rtf = (completed - started) / duration_s.
+    processing_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    processing_completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
     expected_speakers: Mapped[int | None] = mapped_column(Integer)
     chunks_total: Mapped[int] = mapped_column(Integer, default=0)
     chunks_remaining: Mapped[int] = mapped_column(Integer, default=0)

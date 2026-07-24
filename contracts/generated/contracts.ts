@@ -51,10 +51,18 @@ export type DurationS = number | null;
 export type ExpectedSpeakers = number | null;
 export type Filename = string;
 export type Id1 = string;
+/**
+ * Real-time factor: processing wall-time / audio duration (lower is faster). Set once processing finishes; null while it's still running or if the duration is unknown.
+ */
+export type Rtf = number | null;
 export type UploadedAt = string;
 export type DurationS1 = number | null;
 export type Filename1 = string;
 export type Id2 = string;
+/**
+ * Real-time factor: processing wall-time / audio duration (lower is faster). Set once processing finishes; null while it's still running or if the duration is unknown.
+ */
+export type Rtf1 = number | null;
 export type UploadedAt1 = string;
 /**
  * This interface was referenced by `CuBootcampYadroWireContracts`'s JSON-Schema
@@ -189,6 +197,7 @@ export interface RecordingDetail {
   filename: Filename;
   id: Id1;
   progress: Progress;
+  rtf?: Rtf;
   status: RecordingStatus;
   uploaded_at: UploadedAt;
 }
@@ -201,6 +210,7 @@ export interface RecordingSummary {
   filename: Filename1;
   id: Id2;
   progress: Progress;
+  rtf?: Rtf1;
   status: RecordingStatus;
   uploaded_at: UploadedAt1;
 }
