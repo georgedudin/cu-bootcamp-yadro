@@ -5,7 +5,7 @@ SPEAKER_01). Synthetic embeddings exercise the REAL stitch logic end-to-end."""
 import random
 import uuid
 
-from contracts import EMBEDDING_DIM, ChunkResult, ChunkSegment, ChunkWindow, Turn
+from contracts import EMBEDDING_DIM, ChunkResult, ChunkSegment, ChunkWindow, Turn, Word
 from ml.pipeline import stitch
 from ml.pipeline.engine import _normalise
 
@@ -27,6 +27,15 @@ def _turn(start, end, local, true_speaker):
 
 def _seg(start, end, local, text):
     return ChunkSegment(start=start, end=end, text=text, local_speaker=local, words=[])
+
+
+def _seg_words(start, end, local, words):
+    """Segment carrying word timings; faster-whisper tokens keep a leading space."""
+    text = "".join(w for _, _, w in words).strip()
+    return ChunkSegment(
+        start=start, end=end, text=text, local_speaker=local,
+        words=[Word(start=s, end=e, word=w) for s, e, w in words],
+    )
 
 
 def test_identity_survives_flipped_local_labels():
@@ -102,6 +111,30 @@ def test_same_speaker_segments_merge_across_pauses():
         ("teacher", "First sentence. Second after a pause."),
         ("student_1", "A question?"),
         ("teacher", "Back to the teacher."),
+    ]
+
+
+def test_segment_straddling_a_speaker_change_is_split_by_word():
+    # One Whisper segment (0-16 s) spans a teacher->student change at 10 s. Word
+    # timings must cut it into a teacher piece and a student piece instead of
+    # filing both voices under one label.
+    seg = _seg_words(0, 16, "SPEAKER_00", [
+        (0.0, 2.0, "Hello"), (2.0, 4.0, " everyone."),
+        (12.0, 14.0, " Any"), (14.0, 16.0, " questions?"),
+    ])
+    results = [
+        ChunkResult(recording_id=REC, chunk_index=0,
+            segments=[seg],
+            turns=[_turn(0, 10, "SPEAKER_00", true_speaker=0),
+                   _turn(10, 20, "SPEAKER_01", true_speaker=1)]),
+    ]
+    windows = [ChunkWindow(chunk_index=0, start_s=0, end_s=45)]
+
+    out = stitch(results, windows, expected_speakers=None, duration_s=45)
+
+    assert [(s.speaker_id, s.text) for s in out.segments] == [
+        ("teacher", "Hello everyone."),
+        ("student_1", "Any questions?"),
     ]
 
 
