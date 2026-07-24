@@ -8,7 +8,8 @@ persistence.
 
     stitch(results, windows, expected_speakers, duration_s) -> StitchResult
         Global clustering of all turn embeddings -> stable speaker ids,
-        teacher = most total speech time, overlap-seam dedupe.
+        teacher = the speaker most often followed by a speaker switch,
+        overlap-seam dedupe.
 
     preload_chunk_models()
         Eagerly load the chunk models (worker boot / deploy warmup) so a
