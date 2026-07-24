@@ -377,12 +377,20 @@ def transcribe_chunk(job: TranscribeChunkJob) -> ChunkResult:
             )
         )
 
-    return ChunkResult(
+    result = ChunkResult(
         recording_id=job.recording_id,
         chunk_index=job.chunk_index,
         segments=segments,
         turns=turns,
     )
+    # Hand the per-job GPU memory back to the driver. The resident models are
+    # lru_cached and untouched; this only releases the transient diarization /
+    # embedding blocks torch's caching allocator would otherwise keep reserved
+    # at each job's peak. On a GPU shared by several teams that peak accretion
+    # is what grew a ~4 GB worker to >11 GB and eventually OOM'd the box.
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    return result
 
 
 def _cluster_representatives(
